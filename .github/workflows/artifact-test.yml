@@ -1,0 +1,100 @@
+name: Artifact test (reusable)
+
+# Drive the gradient design against the PREBUILT bundles (uploaded earlier in the
+# run by build-artifacts.yml) with every FOSS simulator available per OS, and
+# compare the streamed frame to the golden. The backend is NOT recompiled -- each
+# simulator links/loads the shipped library, exactly as a downstream user would.
+# Reused by ci.yml (PR / push) and release.yml (gate a tag before publishing).
+on:
+  workflow_call:
+
+jobs:
+  # POSIX bundles: Verilator (DPI), GHDL + NVC (VHPIDIRECT), Icarus (VPI). The
+  # harness skips simulators that aren't installed (e.g. Icarus/VPI on macOS).
+  artifact-test:
+    name: artifact-test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest,    artifact: vga-monitor-linux-x86_64 }
+          - { name: linux-arm64,  os: ubuntu-24.04-arm,  artifact: vga-monitor-linux-arm64 }
+          - { name: macos-arm64,  os: macos-15,          artifact: vga-monitor-macos-arm64 }
+          - { name: macos-x86_64, os: macos-15-intel,    artifact: vga-monitor-macos-x86_64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download prebuilt artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist
+
+      - name: Install FOSS simulators + viewer (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential verilator iverilog ffmpeg iproute2
+
+      - name: Install FOSS simulators + viewer (macOS)
+        if: runner.os == 'macOS'
+        # No .vpi is shipped for macOS, so Icarus would be skipped -- omit it.
+        run: brew install verilator ghdl ffmpeg
+
+      - name: Install NVC
+        uses: ./.github/actions/setup-nvc      # installs Homebrew on arm64 Linux too
+
+      # GHDL (llvm backend) for the prebuilt-bundle test: modern GHDL via the
+      # official action on x86_64; apt's ghdl-gcc on arm64 (no arm64 asset, and
+      # noble's ghdl-llvm is broken -- missing libLLVM-18.so.18.1).
+      - name: Setup GHDL (Linux x86_64)
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        uses: ghdl/setup-ghdl@v1
+        with:
+          backend: llvm
+      - name: Setup GHDL (Linux arm64)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: sudo apt-get install -y ghdl-gcc
+
+      - name: Test prebuilt artifacts against all available simulators
+        run: python3 tests/stream_e2e.py --dist dist
+
+  # Windows (MinGW) bundle: Verilator (DPI, links the shipped import lib) and NVC
+  # (VHPI, loaded at runtime with --load). Not run here:
+  #   - GHDL/VHPI: MSYS2's ghdl is the mcode backend (unsupported -- see Makefile).
+  #   - Icarus/VPI: no .vpi is published for Windows.
+  #   - the MSVC bundle: only commercial sims (Questa) consume it.
+  artifact-test-windows:
+    name: artifact-test (windows-x86_64-mingw)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download prebuilt artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: vga-monitor-windows-x86_64-mingw
+          path: dist
+      # NVC isn't packaged in MSYS2, so install the native MinGW-based .msi and
+      # let path-type:inherit expose it to the MSYS2 shell below.
+      - name: Install NVC
+        uses: nickg/setup-nvc@v1
+        with:
+          version: latest
+      - name: Set up MSYS2 (MinGW64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          path-type: inherit
+          install: >-
+            make
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-verilator
+            mingw-w64-x86_64-ffmpeg
+      - name: Test prebuilt artifacts (Verilator/DPI, NVC/VHPI runtime --load)
+        shell: msys2 {0}
+        run: |
+          verilator --version
+          nvc --version
+          python3 tests/stream_e2e.py --dist dist --sim dpi,nvc

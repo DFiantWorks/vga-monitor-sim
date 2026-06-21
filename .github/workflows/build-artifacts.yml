@@ -1,0 +1,128 @@
+name: Build artifacts (reusable)
+
+# Reusable build of the portable, self-contained backend libraries for every
+# published platform (+ the Linux VPI module). Called by ci.yml (PR / push to
+# main, no release packaging) and by release.yml (v* tag, with packaging). No
+# simulator is needed to build the libraries -- the backend has no simulator
+# headers.
+on:
+  workflow_call:
+    inputs:
+      package_release:
+        description: Also stamp versioned filenames and upload release-* archives.
+        type: boolean
+        default: false
+
+jobs:
+  artifacts:
+    name: artifact (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,   os: ubuntu-latest }
+          - { name: linux-arm64,    os: ubuntu-24.04-arm }
+          - { name: macos-arm64,    os: macos-15 }
+          - { name: macos-x86_64,   os: macos-15-intel }
+          - { name: windows-x86_64,       os: windows-latest, toolchain: msvc }
+          - { name: windows-x86_64-mingw, os: windows-latest, toolchain: mingw }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # ---- POSIX (Linux/macOS): portable DPI shared library via `make dist` ----
+      - name: Build DPI library (POSIX)
+        if: runner.os != 'Windows'
+        run: make dist
+
+      # ---- Linux bonus: also build a portable VPI module (make dist-vpi) -----
+      - name: Build VPI module (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iverilog g++
+          make dist-vpi
+
+      # ---- Windows / MSVC: DLLs for MSVC-ABI tools (Questa, Vivado XSim) -------
+      # Winsock is linked by a #pragma in the source.
+      - name: Set up MSVC
+        if: runner.os == 'Windows' && matrix.toolchain == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build DPI + VHPI DLLs (MSVC)
+        if: runner.os == 'Windows' && matrix.toolchain == 'msvc'
+        shell: cmd
+        run: |
+          mkdir build\dist
+          cl /O2 /LD /EHsc backend\vga_monitor.cpp /Fe:build\dist\vga_monitor_dpi.dll
+          cl /O2 /LD /EHsc backend\vga_monitor.cpp vhdl\vga_monitor_vhpi.cpp /Fe:build\dist\vga_monitor_vhpi.dll
+          copy sv\vga_monitor.sv build\dist\
+          copy vhdl\vga_monitor.vhdl build\dist\
+          copy vhdl\vga_monitor_pkg.vhdl build\dist\
+          copy v\vga_monitor.v build\dist\
+
+      # ---- Windows / MinGW (MSYS2): DLLs for MinGW-ABI tools (GHDL, NVC, --------
+      # Verilator). MinGW ignores the Winsock #pragma, so link -lws2_32; fold in
+      # libstdc++/libgcc so the DLLs are self-contained.
+      - name: Set up MSYS2 (MinGW64)
+        if: matrix.toolchain == 'mingw'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+      - name: Build DPI + VHPI DLLs (MinGW)
+        if: matrix.toolchain == 'mingw'
+        shell: msys2 {0}
+        run: |
+          mkdir -p build/dist
+          # --out-implib: MinGW-ABI tools that LINK the DLL (Verilator/DPI,
+          # GHDL/VHPI) need an import library; runtime loaders (NVC --load) don't.
+          # Shipped in the unversioned bundle only -- see ci/package-release.sh.
+          g++ -O2 -shared -static \
+            backend/vga_monitor.cpp -lws2_32 \
+            -Wl,--out-implib,build/dist/libvga_monitor_dpi.dll.a \
+            -o build/dist/vga_monitor_dpi.dll
+          g++ -O2 -shared -static \
+            backend/vga_monitor.cpp vhdl/vga_monitor_vhpi.cpp -lws2_32 \
+            -Wl,--out-implib,build/dist/libvga_monitor_vhpi.dll.a \
+            -o build/dist/vga_monitor_vhpi.dll
+          # Vivado XSim DPI trampoline: a kernel32-only static archive that
+          # XSim's own gcc can link (the real lib's C++/winsock/CRT ABI can't),
+          # which loads vga_monitor_dpi.dll at runtime and forwards. Guard that
+          # it stays CRT-free, otherwise it won't link under XSim.
+          gcc -O2 -c sv/vga_monitor_dpi_xsim.c -o build/dist/vga_monitor_dpi_xsim.o
+          ar rcs build/dist/vga_monitor_dpi.a build/dist/vga_monitor_dpi_xsim.o
+          if nm -u build/dist/vga_monitor_dpi.o build/dist/vga_monitor_dpi_xsim.o 2>/dev/null \
+               | grep -E ' U ' | grep -qv '__imp_'; then
+            echo "ERROR: XSim trampoline has non-kernel32 undefined symbols"; exit 1; fi
+          rm -f build/dist/vga_monitor_dpi_xsim.o
+          cp sv/vga_monitor.sv vhdl/vga_monitor.vhdl vhdl/vga_monitor_pkg.vhdl \
+             v/vga_monitor.v build/dist/
+          ls -l build/dist
+
+      - name: Show artifact contents
+        if: runner.os != 'Windows'
+        run: ls -l build/dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: vga-monitor-${{ matrix.name }}
+          path: build/dist/
+          if-no-files-found: error
+
+      # ---- Release packaging (only when the caller asks) -------------------
+      # Stamp the version into the artifact FILENAMES and pack a per-platform
+      # archive. The repo/Makefile stay version-free, so the unversioned bundle
+      # above (and artifact-test) are unaffected.
+      - name: Package versioned release archive
+        if: ${{ inputs.package_release }}
+        shell: bash
+        run: bash ci/package-release.sh "${GITHUB_REF_NAME#v}" "${{ matrix.name }}" build/dist release
+      - name: Upload release archive
+        if: ${{ inputs.package_release }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.name }}
+          path: release/*.tar.gz
+          if-no-files-found: error

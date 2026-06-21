@@ -250,7 +250,7 @@ void on_frame_complete(Monitor* m) {
     m->frames_done++;
 
     if (!g_stream_target.empty()) {
-        if (m->stream_fd < 0 && !m->stream_tried) stream_connect(m);
+        if (m->stream_fd == kBadSock && !m->stream_tried) stream_connect(m);
         stream_send_frame(m);
     }
 

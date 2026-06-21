@@ -1,0 +1,39 @@
+name: Setup NVC
+description: >-
+  Install the NVC VHDL simulator across every CI runner. Uses Homebrew on macOS
+  and Linux arm64 (both have an nvc bottle, incl. arm64_linux), and the official
+  nickg/setup-nvc action where upstream ships prebuilt assets (Linux x86_64 .deb,
+  Windows .msi).
+
+inputs:
+  version:
+    description: NVC version to install (e.g. "1.21.1") or "latest".
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    # macOS: Homebrew is preinstalled; nvc has an arm64/x86_64 bottle.
+    - name: Install NVC (macOS, Homebrew)
+      if: ${{ runner.os == 'macOS' }}
+      shell: bash
+      run: brew install nvc
+
+    # Linux x86_64 / Windows: the upstream action has prebuilt assets.
+    - name: Install NVC (prebuilt)
+      if: ${{ runner.os == 'Windows' || (runner.os == 'Linux' && runner.arch == 'X64') }}
+      uses: nickg/setup-nvc@v1
+      with:
+        version: ${{ inputs.version }}
+
+    # Linux arm64: no upstream .deb and the ubuntu-*-arm runner has no
+    # preinstalled Homebrew -- install it, then use the arm64_linux nvc bottle.
+    - name: Install NVC (Linux arm64, Homebrew)
+      if: ${{ runner.os == 'Linux' && runner.arch == 'ARM64' }}
+      shell: bash
+      run: |
+        NONINTERACTIVE=1 /bin/bash -c \
+          "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+        echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"   # nvc on PATH for later steps
+        brew install nvc

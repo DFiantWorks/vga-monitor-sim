@@ -33,12 +33,21 @@ VHDL_DUT := examples/vga_signal_generator.vhdl examples/gradient_source.vhdl
         stream-dpi-dist stream-vhpi-dist stream-nvc-dist stream-vpi-dist \
         dist dist-vpi dist-test clean
 
+# ---- GHDL backend ----------------------------------------------------------
+# The VHDL flow uses GHDL's gcc or llvm backend: the foreign C backend is linked
+# into the design at elaboration (ghdl -e -Wl,...). The mcode backend is NOT
+# supported -- it has no link step and would require naming the shared library
+# inside the VHDL `foreign` attribute, which NVC (sharing the same package file)
+# does not accept. Override the binary with GHDL=/path/to/ghdl.
+GHDL ?= ghdl
+
 # ---- DPI / Verilator, built WITHOUT --timing (clock from sim_main) ----------
 stream-dpi:
+	mkdir -p $(BUILD)/stream-dpi
 	verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
 		--top-module tb_stream --Mdir $(BUILD)/stream-dpi -o tb_stream \
 		examples/tb_stream.sv examples/vga_signal_generator.sv examples/gradient_source.sv \
-		sv/vga_monitor.sv $(BACKEND) examples/sim_main_stream.cpp
+		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main_stream.cpp)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-dpi/tb_stream
 
 # ---- Two monitors, two MOVING patterns -> two streams (ports base, base+1) --
@@ -46,11 +55,12 @@ stream-dpi:
 #   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://0.0.0.0:5000?listen=1'
 #   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://0.0.0.0:5001?listen=1'
 stream-two:
+	mkdir -p $(BUILD)/stream-two
 	verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
 		--top-module tb_two_monitors --Mdir $(BUILD)/stream-two -o tb_two_monitors \
 		examples/tb_two_monitors.sv examples/vga_signal_generator.sv \
 		examples/scroll_source.sv examples/bars_box_source.sv \
-		sv/vga_monitor.sv $(BACKEND) examples/sim_main.cpp
+		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main.cpp)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-two/tb_two_monitors
 
 # ---- VHPIDIRECT / GHDL -----------------------------------------------------
@@ -61,9 +71,9 @@ $(BUILD)/stream-vhpi/vhpi.o: vhdl/vga_monitor_vhpi.cpp
 	mkdir -p $(BUILD)/stream-vhpi
 	g++ -O2 -fPIC -c $< -o $@
 stream-vhpi: $(BUILD)/stream-vhpi/backend.o $(BUILD)/stream-vhpi/vhpi.o
-	ghdl -a --std=08 --workdir=$(BUILD)/stream-vhpi \
+	$(GHDL) -a --std=08 --workdir=$(BUILD)/stream-vhpi \
 		vhdl/vga_monitor_pkg.vhdl vhdl/vga_monitor.vhdl $(VHDL_DUT) examples/tb_gradient.vhdl
-	ghdl -e --std=08 --workdir=$(BUILD)/stream-vhpi -o $(BUILD)/stream-vhpi/$(MODULE) \
+	$(GHDL) -e --std=08 --workdir=$(BUILD)/stream-vhpi -o $(BUILD)/stream-vhpi/$(MODULE) \
 		-Wl,$(BUILD)/stream-vhpi/backend.o -Wl,$(BUILD)/stream-vhpi/vhpi.o -Wl,-lstdc++ $(MODULE)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-vhpi/$(MODULE)
 
@@ -156,15 +166,15 @@ stream-dpi-dist:
 	verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
 		--top-module tb_stream --Mdir $(BUILD)/stream-dpi-dist -o tb_stream \
 		examples/tb_stream.sv examples/vga_signal_generator.sv examples/gradient_source.sv \
-		sv/vga_monitor.sv examples/sim_main_stream.cpp \
+		sv/vga_monitor.sv $(abspath examples/sim_main_stream.cpp) \
 		-LDFLAGS "-L$(DIST_ABS) -lvga_monitor_dpi $(RPATH)"
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-dpi-dist/tb_stream
 
 stream-vhpi-dist:
 	mkdir -p $(BUILD)/stream-vhpi-dist
-	ghdl -a --std=08 --workdir=$(BUILD)/stream-vhpi-dist \
+	$(GHDL) -a --std=08 --workdir=$(BUILD)/stream-vhpi-dist \
 		vhdl/vga_monitor_pkg.vhdl vhdl/vga_monitor.vhdl $(VHDL_DUT) examples/tb_gradient.vhdl
-	ghdl -e --std=08 --workdir=$(BUILD)/stream-vhpi-dist -o $(BUILD)/stream-vhpi-dist/$(MODULE) \
+	$(GHDL) -e --std=08 --workdir=$(BUILD)/stream-vhpi-dist -o $(BUILD)/stream-vhpi-dist/$(MODULE) \
 		-Wl,-L$(DIST_ABS) -Wl,-lvga_monitor_vhpi -Wl,-Wl,-rpath,$(DIST_ABS) $(MODULE)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-vhpi-dist/$(MODULE)
 
