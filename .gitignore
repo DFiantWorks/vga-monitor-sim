@@ -1,0 +1,14 @@
+# All build artifacts (demos + test rig) land under build/.
+build/
+obj_dir/
+
+# stray simulation/build outputs
+*.o
+*.cf
+*.vpi
+*.vvp
+*.out
+
+# Python bytecode cache
+__pycache__/
+*.pyc
