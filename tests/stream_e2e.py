@@ -52,6 +52,21 @@ SIMS = {
 IS_WINDOWS = os.name == "nt" or "MSYSTEM" in os.environ
 
 
+def which(name: str):
+    """shutil.which, but also finds extensionless wrapper scripts on Windows.
+    MSYS2 ships tools like `verilator` as a bare Perl/shell wrapper (the real
+    binary is `verilator_bin.exe`); shutil.which misses it on Windows because it
+    only matches names carrying a PATHEXT extension."""
+    found = shutil.which(name)
+    if found or not IS_WINDOWS:
+        return found
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        cand = Path(d) / name
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
 def lib_name(kind: str) -> str:
     """Prebuilt shared-library filename for 'dpi' or 'vhpi' on this OS."""
     if platform.system() == "Darwin":
@@ -75,7 +90,7 @@ def port_listening(port: int) -> bool:
     # Prefer ss (Linux); fall back to netstat (macOS/Windows). Listening
     # endpoints print the port after ':' (ss/Windows) or '.' (BSD/macOS).
     for cmd, needs_listen in (["ss", "-ltn"], False), (["netstat", "-an"], True):
-        if not shutil.which(cmd[0]):
+        if not which(cmd[0]):
             continue
         out = subprocess.run(cmd, capture_output=True, text=True).stdout
         for line in out.splitlines():
@@ -136,12 +151,12 @@ def run_one(sim, dist):
     except subprocess.TimeoutExpired:
         ff.kill()
         print(f"  {sim}: FAIL (ffmpeg did not capture a frame)")
-        print((sim_proc.stdout + sim_proc.stderr)[-800:])
+        print((sim_proc.stdout + sim_proc.stderr)[-6000:])
         return False
 
     if not grab.exists() or grab.stat().st_size == 0:
         print(f"  {sim}: FAIL (no frame grabbed)")
-        print((sim_proc.stdout + sim_proc.stderr)[-800:])
+        print((sim_proc.stdout + sim_proc.stderr)[-6000:])
         return False
 
     ok = filecmp.cmp(grab, GOLDEN, shallow=False)
@@ -159,10 +174,10 @@ def main() -> int:
                     help="test the prebuilt artifacts in DIR instead of building from source")
     args = ap.parse_args()
 
-    if not shutil.which("ffmpeg"):
+    if not which("ffmpeg"):
         print("error: 'ffmpeg' not found (needed for the end-to-end test)")
         return 2
-    if not shutil.which("ss") and not shutil.which("netstat"):
+    if not which("ss") and not which("netstat"):
         print("error: neither 'ss' nor 'netstat' found (needed to detect the viewer)")
         return 2
 
@@ -176,7 +191,7 @@ def main() -> int:
     selected, skipped = [], []
     for s in requested:
         tools = SIMS[s][0]
-        missing = [t for t in tools if not shutil.which(t)]
+        missing = [t for t in tools if not which(t)]
         if missing:
             skipped.append((s, "missing " + ", ".join(missing)))
         elif args.dist and not (Path(args.dist) / dist_file(s)).exists():

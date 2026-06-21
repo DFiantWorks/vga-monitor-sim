@@ -1,0 +1,48 @@
+name: Release
+
+# Build the versioned per-platform archives and publish a GitHub Release.
+# Triggers ONLY on a v* tag -- so it never appears on PR or push-to-main runs.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # Re-run the e2e test on the tagged commit -- don't publish a broken tag.
+  test:
+    uses: ./.github/workflows/test.yml
+
+  # Same build as CI, but with versioned release archives packaged too.
+  build:
+    uses: ./.github/workflows/build-artifacts.yml
+    with:
+      package_release: true
+
+  # Drive the prebuilt bundles (POSIX + Windows/NVC) -- gate the release on the
+  # same artifact tests CI runs, so a tag can't publish a broken bundle.
+  artifact-tests:
+    needs: build
+    uses: ./.github/workflows/artifact-test.yml
+
+  publish:
+    name: publish (${{ github.ref_name }})
+    needs: [test, build, artifact-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # create the release / upload assets
+    steps:
+      - name: Download per-platform release archives
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - run: ls -l release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release/*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true

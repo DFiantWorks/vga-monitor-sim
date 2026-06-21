@@ -1,0 +1,8 @@
+# Shell scripts must keep LF endings so they run on Linux/macOS CI runners,
+# regardless of the committer's platform (e.g. Windows checkouts).
+*.sh text eol=lf
+
+# Workflow YAML embeds Linux shell in `run:` blocks; CRLF would append \r to
+# each command line and break them on the runner. Keep LF.
+*.yml text eol=lf
+*.yaml text eol=lf

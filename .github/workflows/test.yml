@@ -1,0 +1,47 @@
+name: Test (reusable)
+
+# End-to-end test: build the monitor for each foreign interface (DPI/VHPI/VPI),
+# stream a frame over the socket to ffmpeg, compare byte-for-byte to the golden.
+# Reused by ci.yml (PR / push) and release.yml (gate a tag before publishing).
+# Run on x86_64 and arm64 Linux to prove cross-architecture behavior.
+#
+# GHDL uses the llvm backend (mcode is not supported -- see the Makefile):
+#   * x86_64 -- modern GHDL via ghdl/setup-ghdl.
+#   * arm64  -- apt's ghdl-llvm (ghdl/setup-ghdl ships no arm64 asset).
+on:
+  workflow_call:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install simulators + viewer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential verilator iverilog ffmpeg iproute2
+      - name: Install NVC
+        uses: ./.github/actions/setup-nvc
+      - name: Setup GHDL (x86_64)
+        if: ${{ runner.arch == 'X64' }}
+        uses: ghdl/setup-ghdl@v1
+        with:
+          backend: llvm
+      - name: Setup GHDL (arm64)
+        if: ${{ runner.arch == 'ARM64' }}
+        # ghdl/setup-ghdl publishes no arm64 Linux binary (only x86_64 Linux +
+        # aarch64 macOS), so fall back to apt. Use the gcc backend, not llvm:
+        # noble's ghdl-llvm is broken (ghdl1-llvm wants libLLVM-18.so.18.1, which
+        # libllvm18 doesn't provide). gcc has no libLLVM dep and links foreign
+        # code at elaboration just like llvm.
+        run: sudo apt-get install -y ghdl-gcc
+      - name: Tool versions
+        run: verilator --version; iverilog -V | head -1; ghdl --version | head -1; nvc --version | head -1; ffmpeg -version | head -1
+      - name: End-to-end stream test (DPI / VHPI / NVC / VPI vs golden)
+        run: make stream-test

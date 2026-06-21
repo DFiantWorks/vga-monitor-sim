@@ -31,6 +31,12 @@ mkdir -p "$STAGE"
 for f in "$DIST"/*; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
+    # A MinGW import library (.dll.a) embeds the (unversioned) DLL name inside
+    # it, so a filename rename can't version it correctly -- the renamed lib
+    # would still resolve to the unversioned DLL. Omit it from versioned
+    # archives; downstream can load the DLL at runtime (e.g. NVC --load) or
+    # regenerate an import lib with dlltool. It stays in the unversioned bundle.
+    case "$base" in *.dll.a) continue ;; esac
     if [[ "$base" == *.* ]]; then
         new="${base%.*}_$TOK.${base##*.}"  # stem_vX_Y_Z.ext
     else

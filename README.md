@@ -83,14 +83,18 @@ Grab the artifact for your platform from CI (the repo's **Actions** tab → late
 run → **Artifacts**), or build it once yourself with `make dist`. CI publishes a
 bundle for **Linux x86_64/arm64, macOS arm64/x86_64, and Windows x86_64**. Windows
 ships **two** bundles — pick the one matching your simulator's toolchain ABI:
-`windows-x86_64` (MSVC, for Questa/Vivado XSim) and `windows-x86_64-mingw` (MinGW,
-for GHDL/NVC/Verilator). Each bundle contains:
+`windows-x86_64` (MSVC, for **Questa**) and `windows-x86_64-mingw` (MinGW, for
+**GHDL/NVC/Verilator**). (**Vivado XSim** uses its own bundled GCC and won't link
+a foreign-built library — neither the MSVC DLL nor a MinGW `.a` — so on Windows
+build the backend from source with `xsc`; see [Vivado XSim](#vivado-xsim) below.)
+Each bundle contains:
 
 | File | For |
 | --- | --- |
 | `libvga_monitor_dpi.{so,dylib,dll}` | SystemVerilog simulators (DPI-C) |
 | `libvga_monitor_vhpi.{so,dylib}` / `vga_monitor_vhpi.dll` | VHDL simulators (VHPIDIRECT) |
 | `vga_monitor.vpi` (Linux bundle) | Verilog simulators (VPI) |
+| `libvga_monitor_{dpi,vhpi}.dll.a` (MinGW bundle) | import libraries for MinGW-ABI tools that *link* the DLL (Verilator, GHDL); runtime loaders like NVC don't need them |
 | `vga_monitor.sv` / `.vhdl` + `_pkg.vhdl` / `.v` | the HDL wrapper to add to your sources |
 
 Tagged releases (`v*`) also attach a per-platform archive
@@ -100,7 +104,10 @@ file carries a version token (`vga_monitor_v1_4_0.sv`,
 can coexist in one directory. The **module/entity, C-ABI, and `$system-task`
 names inside the files are unchanged** — only the filenames are versioned, so
 upgrading is a one-line edit to your source list and `-l`/`-sv_lib`/`--load`/`-m`
-references (e.g. `-sv_lib vga_monitor_dpi_v1_4_0`), nothing else.
+references (e.g. `-sv_lib vga_monitor_dpi_v1_4_0`), nothing else. (The MinGW
+import libraries are the one exception — they embed the unversioned DLL name, so
+they're omitted from versioned archives; link a versioned DLL by generating an
+import lib with `dlltool`, or load it at runtime.)
 
 The prebuilt libraries carry **no simulator headers**, so they load into any
 matching simulator as-is. On Linux/macOS libstdc++/libgcc are folded in, so the
@@ -180,13 +187,23 @@ VGA_MONITOR_STREAM=127.0.0.1:5000 \
     vsim -c my_tb -sv_lib <dist>/vga_monitor_dpi -do "run -all; quit"
 ```
 
-**Vivado XSim** — load the library at elaboration (`-sv_root` is its directory):
+<a name="vivado-xsim"></a>
+**Vivado XSim** — XSim links DPI C through its **own bundled GCC**, which won't
+link a library built by another toolchain (the MSVC DLL is rejected and a MinGW
+`.a` fails to link against XSim's runtime). So don't use a prebuilt library —
+compile the backend from source with XSim's `xsc`, which is self-consistent:
 
 ```bash
+xsc backend/vga_monitor.cpp                       # -> xsim.dir/work/xsc/dpi.so
 xvlog -sv my_tb.sv my_design.sv vga_monitor.sv
-xelab my_tb -s sim -sv_root <dist> -sv_lib vga_monitor_dpi
+xelab my_tb -s sim -sv_lib dpi
 VGA_MONITOR_STREAM=127.0.0.1:5000 xsim sim -R
 ```
+
+On **Windows** the backend uses Winsock; pass it to `xsc`
+(`xsc backend/vga_monitor.cpp -gcc_link_options "-lws2_32"`). Because `xsc`
+ships only inside Vivado (not installable in CI), this path isn't covered by the
+test suite.
 
 ## VHDL — VHPIDIRECT
 
@@ -252,10 +269,22 @@ sudo apt install build-essential verilator iverilog python3 ffmpeg iproute2
 
 ### GHDL (for the VHDL flow)
 
-Tested with GHDL 6.0.0-dev (LLVM backend):
+Use GHDL's **gcc** or **llvm** backend — the distro package is enough:
 
 ```bash
-sudo apt update
+sudo apt install ghdl-llvm     # or ghdl-gcc
+```
+
+> **The mcode backend is not supported.** mcode has no link step, so it can only
+> bind a VHPIDIRECT subprogram by naming the shared library *inside* the VHDL
+> `foreign` attribute — which NVC (sharing the same `vga_monitor_pkg.vhdl`) does
+> not accept. The gcc/llvm backends link the C++ backend at elaboration, which is
+> also GHDL's recommended path for VHPIDIRECT. Override the binary with
+> `GHDL=/path/to/ghdl` if you have several installed.
+
+To build a specific backend from source instead (e.g. LLVM):
+
+```bash
 sudo apt install -y git make gnat zlib1g-dev libreadline-dev \
                     libffi-dev libgmp-dev libboost-all-dev \
                     gcc g++ python3-pip llvm clang cmake

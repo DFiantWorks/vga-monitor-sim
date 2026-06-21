@@ -2,201 +2,28 @@ name: CI
 
 on:
   push:
-  pull_request:
+    branches: [main]      # CI on merges to main...
+  pull_request:           # ...and on every PR (feature branches run here, once)
   workflow_dispatch:
+  # Release tags (v*) are handled by release.yml, not here -- so the publish
+  # path never appears on PR or main-push runs.
 
 permissions:
   contents: read
 
 jobs:
-  # End-to-end test: build the monitor for each foreign interface (DPI/VHPI/VPI),
-  # stream a frame over the socket to ffmpeg, compare byte-for-byte to the golden.
-  # Run on both x86_64 and arm64 Linux to prove cross-architecture behavior.
+  # End-to-end source test (reusable; release.yml runs the same gate on a tag).
   test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install simulators + viewer
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential verilator iverilog ghdl nvc ffmpeg iproute2
-      - name: Tool versions
-        run: verilator --version; iverilog -V | head -1; ghdl --version | head -1; nvc --version | head -1; ffmpeg -version | head -1
-      - name: End-to-end stream test (DPI / VHPI / NVC / VPI vs golden)
-        run: make stream-test
+    uses: ./.github/workflows/test.yml
 
-  # Shareable artifacts: the portable, self-contained DPI backend library for
-  # each OS/architecture, plus (on Linux) the VPI module. No simulator is
-  # needed to build the library -- the backend has no simulator headers.
+  # Shareable artifacts: the portable, self-contained backend libraries for
+  # each OS/architecture, plus (on Linux) the VPI module. Defined in a reusable
+  # workflow so release.yml can build the exact same bundles on a tag.
   artifacts:
-    name: artifact (${{ matrix.name }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: linux-x86_64,   os: ubuntu-latest }
-          - { name: linux-arm64,    os: ubuntu-24.04-arm }
-          - { name: macos-arm64,    os: macos-15 }
-          - { name: macos-x86_64,   os: macos-15-intel }
-          - { name: windows-x86_64,       os: windows-latest, toolchain: msvc }
-          - { name: windows-x86_64-mingw, os: windows-latest, toolchain: mingw }
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
+    uses: ./.github/workflows/build-artifacts.yml
 
-      # ---- POSIX (Linux/macOS): portable DPI shared library via `make dist` ----
-      - name: Build DPI library (POSIX)
-        if: runner.os != 'Windows'
-        run: make dist
-
-      # ---- Linux bonus: also build a portable VPI module (make dist-vpi) -----
-      - name: Build VPI module (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends iverilog g++
-          make dist-vpi
-
-      # ---- Windows / MSVC: DLLs for MSVC-ABI tools (Questa, Vivado XSim) -------
-      # Winsock is linked by a #pragma in the source.
-      - name: Set up MSVC
-        if: runner.os == 'Windows' && matrix.toolchain == 'msvc'
-        uses: ilammy/msvc-dev-cmd@v1
-      - name: Build DPI + VHPI DLLs (MSVC)
-        if: runner.os == 'Windows' && matrix.toolchain == 'msvc'
-        shell: cmd
-        run: |
-          mkdir build\dist
-          cl /O2 /LD /EHsc backend\vga_monitor.cpp /Fe:build\dist\vga_monitor_dpi.dll
-          cl /O2 /LD /EHsc backend\vga_monitor.cpp vhdl\vga_monitor_vhpi.cpp /Fe:build\dist\vga_monitor_vhpi.dll
-          copy sv\vga_monitor.sv build\dist\
-          copy vhdl\vga_monitor.vhdl build\dist\
-          copy vhdl\vga_monitor_pkg.vhdl build\dist\
-          copy v\vga_monitor.v build\dist\
-
-      # ---- Windows / MinGW (MSYS2): DLLs for MinGW-ABI tools (GHDL, NVC, --------
-      # Verilator). MinGW ignores the Winsock #pragma, so link -lws2_32; fold in
-      # libstdc++/libgcc so the DLLs are self-contained.
-      - name: Set up MSYS2 (MinGW64)
-        if: matrix.toolchain == 'mingw'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: mingw-w64-x86_64-gcc
-      - name: Build DPI + VHPI DLLs (MinGW)
-        if: matrix.toolchain == 'mingw'
-        shell: msys2 {0}
-        run: |
-          mkdir -p build/dist
-          g++ -O2 -shared -static \
-            backend/vga_monitor.cpp -lws2_32 -o build/dist/vga_monitor_dpi.dll
-          g++ -O2 -shared -static \
-            backend/vga_monitor.cpp vhdl/vga_monitor_vhpi.cpp -lws2_32 \
-            -o build/dist/vga_monitor_vhpi.dll
-          cp sv/vga_monitor.sv vhdl/vga_monitor.vhdl vhdl/vga_monitor_pkg.vhdl \
-             v/vga_monitor.v build/dist/
-          ls -l build/dist
-
-      - name: Show artifact contents
-        if: runner.os != 'Windows'
-        run: ls -l build/dist
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: vga-monitor-${{ matrix.name }}
-          path: build/dist/
-          if-no-files-found: error
-
-      # ---- Release packaging (v* tags only) --------------------------------
-      # Stamp the version into the artifact FILENAMES and pack a per-platform
-      # archive. Done only here, in CI -- the repo/Makefile stay version-free,
-      # so the unversioned bundle above (and artifact-test) are unaffected.
-      - name: Package versioned release archive
-        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-        shell: bash
-        run: bash ci/package-release.sh "${GITHUB_REF_NAME#v}" "${{ matrix.name }}" build/dist release
-      - name: Upload release archive
-        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-${{ matrix.name }}
-          path: release/*.tar.gz
-          if-no-files-found: error
-
-  # End-to-end test of the PREBUILT artifacts: download each OS bundle and drive
-  # the gradient design against it with every FOSS simulator available on that OS
-  # -- Verilator (DPI), GHDL + NVC (VHPIDIRECT), Icarus (VPI) -- comparing the
-  # streamed frame to the golden. The backend is NOT recompiled; each simulator
-  # links/loads the shipped library, exactly as a downstream user would. The
-  # harness skips simulators that aren't installed (e.g. Icarus/VPI on macOS,
-  # where no .vpi is shipped).
-  #
-  # Windows is intentionally not covered here: the MinGW/MSVC DLLs ship without
-  # import libraries, MSYS2's FOSS-simulator coverage is partial, and no .vpi is
-  # published for Windows -- the `artifacts` job already build-verifies those DLLs.
-  artifact-test:
-    name: artifact-test (${{ matrix.name }})
+  # End-to-end test of the PREBUILT bundles (POSIX matrix + Windows/NVC), reused
+  # so release.yml gates a tag on the exact same checks.
+  artifact-tests:
     needs: artifacts
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { name: linux-x86_64, os: ubuntu-latest,    artifact: vga-monitor-linux-x86_64 }
-          - { name: linux-arm64,  os: ubuntu-24.04-arm,  artifact: vga-monitor-linux-arm64 }
-          - { name: macos-arm64,  os: macos-15,          artifact: vga-monitor-macos-arm64 }
-          - { name: macos-x86_64, os: macos-15-intel,    artifact: vga-monitor-macos-x86_64 }
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Download prebuilt artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: ${{ matrix.artifact }}
-          path: dist
-
-      - name: Install FOSS simulators + viewer (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential verilator iverilog ghdl nvc ffmpeg iproute2
-
-      - name: Install FOSS simulators + viewer (macOS)
-        if: runner.os == 'macOS'
-        # No .vpi is shipped for macOS, so Icarus would be skipped -- omit it.
-        run: brew install verilator ghdl nvc ffmpeg
-
-      - name: Test prebuilt artifacts against all available simulators
-        run: python3 tests/stream_e2e.py --dist dist
-
-  # Publish a GitHub Release with the versioned per-platform archives -- only on
-  # a v* tag, and only once the build + both test passes are green.
-  publish:
-    name: publish (${{ github.ref_name }})
-    needs: [test, artifacts, artifact-test]
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write          # create the release / upload assets
-    steps:
-      - name: Download per-platform release archives
-        uses: actions/download-artifact@v8
-        with:
-          pattern: release-*
-          path: release
-          merge-multiple: true
-      - run: ls -l release
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          files: release/*.tar.gz
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+    uses: ./.github/workflows/artifact-test.yml
