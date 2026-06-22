@@ -43,6 +43,15 @@ jobs:
           sudo apt-get install -y --no-install-recommends iverilog g++
           make dist-vpi
 
+      # ---- macOS bonus: also build a VPI module. Homebrew's icarus-verilog
+      # supplies the vpi_user.h header; the Darwin dist-vpi recipe links it as a
+      # -bundle that resolves vpi_* from vvp at load (no import lib needed).
+      - name: Build VPI module (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install icarus-verilog
+          make dist-vpi
+
       # ---- Windows / MSVC: DLLs for MSVC-ABI tools (Questa, Vivado XSim) -------
       # Winsock is linked by a #pragma in the source.
       - name: Set up MSVC
@@ -69,7 +78,11 @@ jobs:
         with:
           msystem: MINGW64
           update: true
-          install: mingw-w64-x86_64-gcc
+          # iverilog supplies vpi_user.h + libvpi.a for the VPI module, built with
+          # the same MinGW that built its vvp (a foreign MinGW won't load).
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-iverilog
       - name: Build DPI + VHPI DLLs (MinGW)
         if: matrix.toolchain == 'mingw'
         shell: msys2 {0}
@@ -96,6 +109,13 @@ jobs:
                | grep -E ' U ' | grep -qv '__imp_'; then
             echo "ERROR: XSim trampoline has non-kernel32 undefined symbols"; exit 1; fi
           rm -f build/dist/vga_monitor_dpi_xsim.o
+          # Icarus VPI module: link the VPI import lib + winsock and fold in the
+          # runtime so it's self-contained. No glibc strtol wrap (Linux-only).
+          IVLP="$(dirname "$(command -v iverilog)")/.."
+          g++ -O2 -shared -static -I"$IVLP/include/iverilog" \
+            v/vga_monitor_vpi.cpp backend/vga_monitor.cpp \
+            "$IVLP/lib/libvpi.a" -lws2_32 \
+            -o build/dist/vga_monitor.vpi
           cp sv/vga_monitor.sv vhdl/vga_monitor.vhdl vhdl/vga_monitor_pkg.vhdl \
              v/vga_monitor.v build/dist/
           ls -l build/dist

@@ -93,9 +93,7 @@ endif
 
 stream-vpi:
 	mkdir -p $(BUILD)/stream-vpi
-	g++ -O2 -fPIC -shared -I$(IVL_INC) -Wl,--wrap=__isoc23_strtol \
-		v/vga_monitor_vpi.cpp v/glibc_compat.c $(BACKEND) \
-		-o $(BUILD)/stream-vpi/vga_monitor.vpi
+	$(VPI_BUILD) -o $(BUILD)/stream-vpi/vga_monitor.vpi
 	iverilog -g2012 -o $(BUILD)/stream-vpi/$(MODULE).vvp -s $(MODULE) \
 		examples/$(MODULE).v v/vga_monitor.v $(SV_DUT)
 	VGA_MONITOR_STREAM=$(STREAM) \
@@ -151,11 +149,22 @@ dist:
 	@echo "built $(DIST)/$(DPI_LIB) and $(DIST)/$(VHPI_LIB)"
 
 # Icarus VPI module -- needs iverilog's headers, so it's split from `dist`.
+# Portable across Icarus on Linux/macOS/Windows. The glibc strtol wrap is
+# Linux-only (see v/glibc_compat.c); macOS resolves vpi_* via dynamic lookup at
+# load; Windows/MinGW links the VPI import library + winsock and folds in the
+# runtime so the module is self-contained.
+ifeq ($(UNAME_S),Darwin)
+  VPI_LINK := -bundle -undefined dynamic_lookup
+else ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
+  VPI_LINK := -shared -static $(dir $(IVL_INC))../lib/libvpi.a -lws2_32
+else
+  VPI_LINK := -shared -Wl,--wrap=__isoc23_strtol v/glibc_compat.c
+endif
+VPI_BUILD = $(CXX) -O2 -fPIC -I$(IVL_INC) v/vga_monitor_vpi.cpp $(BACKEND) $(VPI_LINK)
+
 dist-vpi:
 	mkdir -p $(DIST)
-	g++ -O2 -fPIC -shared -I$(IVL_INC) -Wl,--wrap=__isoc23_strtol \
-		v/vga_monitor_vpi.cpp v/glibc_compat.c $(BACKEND) \
-		-o $(DIST)/vga_monitor.vpi
+	$(VPI_BUILD) -o $(DIST)/vga_monitor.vpi
 
 # ---- Artifact tests: drive the design against the PREBUILT libs in $(DIST) --
 # Same fixtures as the stream-* targets, but the backend is NOT recompiled --
