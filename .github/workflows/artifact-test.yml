@@ -9,8 +9,8 @@ on:
   workflow_call:
 
 jobs:
-  # POSIX bundles: Verilator (DPI), GHDL + NVC (VHPIDIRECT), Icarus (VPI). The
-  # harness skips simulators that aren't installed (e.g. Icarus/VPI on macOS).
+  # POSIX bundles: Verilator (DPI), GHDL + NVC (VHPIDIRECT), Icarus (VPI), on
+  # both Linux and macOS. The harness skips any simulator that isn't installed.
   artifact-test:
     name: artifact-test (${{ matrix.name }})
     strategy:
@@ -39,8 +39,7 @@ jobs:
 
       - name: Install FOSS simulators + viewer (macOS)
         if: runner.os == 'macOS'
-        # No .vpi is shipped for macOS, so Icarus would be skipped -- omit it.
-        run: brew install verilator ghdl ffmpeg
+        run: brew install verilator ghdl icarus-verilog ffmpeg
 
       - name: Install NVC
         uses: ./.github/actions/setup-nvc      # installs Homebrew on arm64 Linux too
@@ -60,11 +59,12 @@ jobs:
       - name: Test prebuilt artifacts against all available simulators
         run: python3 tests/stream_e2e.py --dist dist
 
-  # Windows (MinGW) bundle: Verilator (DPI, links the shipped import lib) and NVC
-  # (VHPI, loaded at runtime with --load). Not run here:
-  #   - GHDL/VHPI: MSYS2's ghdl is the mcode backend (unsupported -- see Makefile).
-  #   - Icarus/VPI: no .vpi is published for Windows.
-  #   - the MSVC bundle: only commercial sims (Questa) consume it.
+  # Windows (MinGW) bundle: Verilator (DPI, links the shipped import lib), NVC
+  # (VHPI, loaded at runtime with --load), and Icarus (VPI, loads the shipped
+  # .vpi). GHDL/VHPI is split into its own job below: ghdl-llvm pulls a newer
+  # gcc/libstdc++ (via gcc-ada) that is ABI-skewed against the prebuilt Verilator
+  # package and breaks its link, so the two can't share one MSYS2 toolchain.
+  # Not run here: the MSVC bundle -- only commercial sims (Questa) consume it.
   artifact-test-windows:
     name: artifact-test (windows-x86_64-mingw)
     runs-on: windows-latest
@@ -91,10 +91,41 @@ jobs:
             make
             mingw-w64-x86_64-python
             mingw-w64-x86_64-verilator
+            mingw-w64-x86_64-iverilog
             mingw-w64-x86_64-ffmpeg
-      - name: Test prebuilt artifacts (Verilator/DPI, NVC/VHPI runtime --load)
+      - name: Test prebuilt artifacts (Verilator/DPI, NVC/VHPI runtime --load, Icarus/VPI)
         shell: msys2 {0}
         run: |
           verilator --version
           nvc --version
-          python3 tests/stream_e2e.py --dist dist --sim dpi,nvc
+          iverilog -V | head -1
+          python3 tests/stream_e2e.py --dist dist --sim dpi,nvc,vpi
+
+  # Windows GHDL/VHPI, isolated (see note above). GHDL's LLVM backend links the
+  # shipped VHPI import lib at elaboration and loads the DLL at run time; mcode
+  # has no link step, so ghdl-llvm is required.
+  artifact-test-windows-ghdl:
+    name: artifact-test (windows-x86_64-mingw, GHDL)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download prebuilt artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: vga-monitor-windows-x86_64-mingw
+          path: dist
+      - name: Set up MSYS2 (MinGW64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-ghdl-llvm
+            mingw-w64-x86_64-ffmpeg
+      - name: Test prebuilt artifacts (GHDL/VHPI, LLVM backend)
+        shell: msys2 {0}
+        run: |
+          ghdl --version | head -1
+          python3 tests/stream_e2e.py --dist dist --sim vhpi
