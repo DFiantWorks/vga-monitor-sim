@@ -1,39 +1,39 @@
 # VGA Monitor Hardware Simulation (DPI/VPI/VHPI)
 
-Watch your HDL design's VGA output in software — no FPGA, no physical monitor.
+Watch your HDL design's VGA output in software: no FPGA, no physical monitor.
 Wire your design's VGA signals (`r, g, b, hsync, vsync`) into a drop-in
 `vga_monitor` module; it reconstructs the image and **streams it as raw rgb24
-over TCP to any standard viewer** (e.g. `ffplay`) — like plugging a cable into a
+over TCP to any standard viewer** (e.g. `ffplay`), like plugging a cable into a
 real monitor, except the cable is a socket.
 
 One C++ backend drives **every major HDL simulator**, across SystemVerilog,
-VHDL, and Verilog, on Linux, macOS, and Windows — and every path reconstructs a
+VHDL, and Verilog, on Linux, macOS, and Windows; every path reconstructs a
 **byte-identical** frame.
 
 ## Why use it
 
 - **Zero configuration.** The monitor takes **no clock and no parameters**. Wire
-  only the VGA signaling and it recovers everything from the signal itself — sync
-  polarity, pixel clock, active resolution and offset — locking the way a real
+  only the VGA signaling and it recovers everything from the signal itself (sync
+  polarity, pixel clock, active resolution and offset), locking the way a real
   monitor's PLL does.
 - **No GUI in the simulator.** No windowing toolkit is linked into the simulator
   process, so the in-process artifact is tiny and portable (libc/libstdc++ only).
   The viewer is a separate, off-the-shelf program that can run on another machine.
 - **Nothing to install to *use* it.** Download the prebuilt artifact for your
-  OS/arch and go — no C++ toolchain, no extra libraries on the simulator side.
+  OS/arch and go: no C++ toolchain, no extra libraries on the simulator side.
 - **Drop in anywhere.** The same module instantiates anywhere in your hierarchy
   in SystemVerilog, VHDL, or Verilog. Multiple instances stream to `port+i`, one
   viewer each.
 - **Cross-simulator equivalence, proven.** The end-to-end test grabs a frame off
   the socket through the real viewer path and diffs it byte-for-byte against the
-  golden in [golden/](golden/) — so a passing run is also a cross-simulator
+  golden in [golden/](golden/), so a passing run is also a cross-simulator
   equivalence proof.
 
 ## Compatibility
 
 The same simulator-agnostic backend
 ([backend/vga_monitor.cpp](backend/vga_monitor.cpp)) reaches every simulator
-through three thin foreign-interface shims — one per HDL:
+through three thin foreign-interface shims, one per HDL:
 
 ```mermaid
 flowchart TD
@@ -56,18 +56,17 @@ flowchart TD
 | [Vivado XSim](#vivado-xsim) | SystemVerilog | DPI-C | ✅ | — | ✅ MinGW |
 | [GHDL](#ghdl) | VHDL | VHPIDIRECT | ✅ | ✅ | —¹ |
 | [NVC](#nvc) | VHDL | VHPIDIRECT | ✅ | ✅ | ✅ MinGW |
-| [Icarus Verilog](#verilog--vpi) | Verilog | VPI | ✅ | —² | —² |
+| [Icarus Verilog](#verilog--vpi) | Verilog | VPI | ✅ | ✅ | ✅ MinGW |
 
 CI publishes artifacts for **Linux x86_64/arm64, macOS arm64/x86_64, and Windows
 x86_64**. On Windows, pick the bundle matching your simulator's ABI:
 `windows-x86_64` (**MSVC**, for Questa) or `windows-x86_64-mingw` (**MinGW**, for
-Verilator / NVC / Vivado XSim) — see [Getting the monitor](#getting-the-monitor-no-dependencies).
+Verilator / NVC / Vivado XSim); see [Getting the monitor](#getting-the-monitor-no-dependencies).
 
 ¹ On Windows the only packaged GHDL is the mcode backend, which can't link a
   VHPIDIRECT library (see [the mcode note](#ghdl-for-the-vhdl-flow)). For VHDL on
   Windows use NVC, or run the design in Questa/XSim via the SystemVerilog DPI
   wrapper.
-² No `.vpi` is published for macOS/Windows yet.
 
 ## How it fits in your design
 
@@ -120,7 +119,7 @@ Makefile                                        per-simulator stream targets
 
 # Prerequisites
 
-There are two very different needs — keep them separate:
+There are two very different needs; keep them separate:
 
 - **To *use* the monitor** (drive it from your simulator and watch it): your HDL
   simulator, the **prebuilt monitor artifact** for your OS/arch, and a raw-rgb24
@@ -130,19 +129,20 @@ There are two very different needs — keep them separate:
 
 ## Getting the monitor (no dependencies)
 
-Grab the artifact for your platform from CI (the repo's **Actions** tab → latest
-run → **Artifacts**), or build it once yourself with `make dist`. CI publishes a
-bundle for **Linux x86_64/arm64, macOS arm64/x86_64, and Windows x86_64**. Windows
-ships **two** bundles — pick the one matching your simulator's toolchain ABI:
-`windows-x86_64` (MSVC, for **Questa**) and `windows-x86_64-mingw` (MinGW, for
+Download the bundle for your platform from the
+[**Releases**](https://github.com/DFiantWorks/vga-monitor-sim/releases) page (or
+build it yourself with `make dist`). Each release provides a bundle for **Linux
+x86_64/arm64, macOS arm64/x86_64, and Windows x86_64**. Windows ships **two**
+bundles; pick the one matching your simulator's toolchain ABI: `windows-x86_64`
+(MSVC, for **Questa**) and `windows-x86_64-mingw` (MinGW, for
 **GHDL/NVC/Verilator and Vivado XSim**). Each bundle contains:
 
 | File | For |
 | --- | --- |
 | `libvga_monitor_dpi.{so,dylib,dll}` | SystemVerilog simulators (DPI-C) |
 | `libvga_monitor_vhpi.{so,dylib}` / `vga_monitor_vhpi.dll` | VHDL simulators (VHPIDIRECT) |
-| `vga_monitor.vpi` (Linux bundle) | Verilog simulators (VPI) |
-| `vga_monitor_dpi.a` (MinGW bundle) | Vivado XSim — the shim XSim's GCC links (see [Vivado XSim](#vivado-xsim)) |
+| `vga_monitor.vpi` (Linux, macOS, MinGW bundles) | Verilog simulators (VPI) |
+| `vga_monitor_dpi.a` (MinGW bundle) | Vivado XSim: the shim XSim's GCC links (see [Vivado XSim](#vivado-xsim)) |
 | `libvga_monitor_{dpi,vhpi}.dll.a` (MinGW bundle) | import libraries for MinGW-ABI tools that *link* the DLL (Verilator, GHDL); runtime loaders like NVC don't need them |
 | `vga_monitor.sv` / `.vhdl` + `_pkg.vhdl` / `.v` | the HDL wrapper to add to your sources |
 
@@ -151,16 +151,16 @@ Tagged releases (`v*`) also attach a per-platform archive
 file carries a version token (`vga_monitor_v1_4_0.sv`,
 `libvga_monitor_dpi_v1_4_0.so`, `vga_monitor_v1_4_0.vpi`, …) so multiple versions
 can coexist in one directory. The **module/entity, C-ABI, and `$system-task`
-names inside the files are unchanged** — only the filenames are versioned, so
+names inside the files are unchanged**, only the filenames are versioned, so
 upgrading is a one-line edit to your source list and `-l`/`-sv_lib`/`--load`/`-m`
 references (e.g. `-sv_lib vga_monitor_dpi_v1_4_0`), nothing else. (The MinGW
-import libraries are the one exception — they embed the unversioned DLL name, so
+import libraries are the one exception: they embed the unversioned DLL name, so
 they're omitted from versioned archives; link a versioned DLL by generating an
 import lib with `dlltool`, or load it at runtime.)
 
 The prebuilt libraries carry **no simulator headers**, so they load into any
 matching simulator as-is. On Linux/macOS libstdc++/libgcc are folded in, so the
-only runtime dependency is libc — **nothing else to install on the simulator
+only runtime dependency is libc; **nothing else to install on the simulator
 side**.
 
 ## A viewer, per OS
@@ -189,15 +189,15 @@ Alternatives that also read raw rgb24: `mpv`, VLC, GStreamer.
 
 The flow is the same for every simulator:
 
-1. **Get the monitor** for your platform — the prebuilt library + HDL wrapper (see
+1. **Get the monitor** for your platform: the prebuilt library + HDL wrapper (see
    [Getting the monitor](#getting-the-monitor-no-dependencies)).
-2. **Wire** the monitor into your design (one line — see the snippets above).
-3. **Start a viewer** (it listens — see [A viewer, per OS](#a-viewer-per-os)).
+2. **Wire** the monitor into your design (one line, see the snippets above).
+3. **Start a viewer** (it listens; see [A viewer, per OS](#a-viewer-per-os)).
 4. **Run your simulator** with `VGA_MONITOR_STREAM=host:port` set.
 
 The frame size is fixed once geometry locks, so a standard viewer needs the
 resolution up front (`-video_size`); the monitor logs the locked geometry
-(`auto-locked 640x480 ...`) — read that line, then point the viewer at it. Two
+(`auto-locked 640x480 ...`); read that line, then point the viewer at it. Two
 environment variables control a run:
 
 | Variable | Effect |
@@ -205,7 +205,7 @@ environment variables control a run:
 | `VGA_MONITOR_STREAM=host:port` | stream finished frames as raw rgb24 (instance *i* → `port+i`) |
 | `VGA_MONITOR_FRAMES=<N>` | exit after N complete frames |
 
-The viewer can be anywhere reachable — e.g. the simulator on a headless server
+The viewer can be anywhere reachable, e.g. the simulator on a headless server
 streaming to `ffplay` on your laptop. On Windows set the variable with
 `set VGA_MONITOR_STREAM=127.0.0.1:5000` (cmd) or `$env:VGA_MONITOR_STREAM=...`
 (PowerShell) before launching the simulator.
@@ -262,13 +262,13 @@ CI, so this path is verified manually, not in the test suite.)
 ## VHDL — VHPIDIRECT
 
 For **GHDL** and **NVC**. Analyze `vga_monitor_pkg.vhdl` + `vga_monitor.vhdl`
-alongside your design and supply `libvga_monitor_vhpi.{so,dylib}` (self-contained
-— libstdc++/libgcc folded in). On Windows use `vga_monitor_vhpi.dll` from the
+alongside your design and supply `libvga_monitor_vhpi.{so,dylib}` (self-contained,
+libstdc++/libgcc folded in). On Windows use `vga_monitor_vhpi.dll` from the
 **`windows-x86_64-mingw`** bundle, since GHDL and NVC are MinGW-based there.
 
 > The VHPIDIRECT wrapper binds via GHDL's `foreign` convention, which **GHDL and
 > NVC** implement. For a VHDL design in **Questa or Vivado XSim**, don't use this
-> wrapper — both are mixed-language, so instantiate the SystemVerilog
+> wrapper; both are mixed-language, so instantiate the SystemVerilog
 > `vga_monitor` module instead and use the DPI library
 > ([SystemVerilog — DPI-C](#systemverilog--dpi-c)).
 
@@ -295,22 +295,24 @@ VGA_MONITOR_STREAM=127.0.0.1:5000 nvc --std=2008 -r my_tb --load <dist>/libvga_m
 ## Verilog — VPI
 
 For **Icarus Verilog** and other VPI-capable simulators. Add `vga_monitor.v` to
-your sources and load the prebuilt `vga_monitor.vpi` module with `vvp -m`:
+your sources and load the prebuilt `vga_monitor.vpi` module with `vvp -m`. On
+Windows use the `vga_monitor.vpi` from the **`windows-x86_64-mingw`** bundle,
+since Icarus is MinGW-based there.
 
 ```bash
 iverilog -g2012 -o my_tb.vvp -s my_tb my_tb.v my_design.v vga_monitor.v
 VGA_MONITOR_STREAM=127.0.0.1:5000 vvp -M<dist> -m vga_monitor my_tb.vvp
 ```
 
-(If your `vvp` bundles an older glibc than the `.vpi` was built against — e.g.
-oss-cad-suite — see [the Icarus glibc note](#icarus-glibc-note).)
+(If your `vvp` bundles an older glibc than the `.vpi` was built against, e.g.
+oss-cad-suite, see [the Icarus glibc note](#icarus-glibc-note).)
 
 ---
 
 # Building & testing from source
 
 This is only needed if you want to build the monitor yourself or run the test
-suite — using a published artifact requires none of this.
+suite; using a published artifact requires none of this.
 
 ## Prerequisites
 
@@ -327,7 +329,7 @@ sudo apt install build-essential verilator iverilog python3 ffmpeg iproute2
 
 ### GHDL (for the VHDL flow)
 
-Use GHDL's **gcc** or **llvm** backend — the distro package is enough:
+Use GHDL's **gcc** or **llvm** backend; the distro package is enough:
 
 ```bash
 sudo apt install ghdl-llvm     # or ghdl-gcc
@@ -335,7 +337,7 @@ sudo apt install ghdl-llvm     # or ghdl-gcc
 
 > **The mcode backend is not supported.** mcode has no link step, so it can only
 > bind a VHPIDIRECT subprogram by naming the shared library *inside* the VHDL
-> `foreign` attribute — which NVC (sharing the same `vga_monitor_pkg.vhdl`) does
+> `foreign` attribute, which NVC (sharing the same `vga_monitor_pkg.vhdl`) does
 > not accept. The gcc/llvm backends link the C++ backend at elaboration, which is
 > also GHDL's recommended path for VHPIDIRECT. Override the binary with
 > `GHDL=/path/to/ghdl` if you have several installed.
@@ -384,7 +386,7 @@ make dist-test            # drive the PREBUILT artifacts in $(DIST) instead
 ```
 
 For each simulator this starts `ffmpeg` as the viewer, grabs exactly one frame
-off the socket, and compares it byte-for-byte to the committed golden — exiting
+off the socket, and compares it byte-for-byte to the committed golden, exiting
 non-zero on any mismatch. It needs `ffmpeg` and either `ss` or `netstat`, and
 **skips any simulator whose tool isn't installed** (logging the skip), so the
 same command runs on Linux, macOS, and Windows with whatever FOSS simulators are
@@ -393,12 +395,12 @@ present.
 `dist-test` is what CI's `artifact-test` job runs on Linux and macOS: it
 downloads the published bundle and drives the design against the shipped
 libraries with every available FOSS simulator (Verilator/DPI, GHDL + NVC/VHPI,
-Icarus/VPI) — proving the artifacts work without recompiling the backend.
+Icarus/VPI), proving the artifacts work without recompiling the backend.
 
 ## Build the shareable library yourself
 
 The backend compiles standalone into portable shared libraries that the
-simulators load alongside the HDL wrappers — no need to rebuild on the target:
+simulators load alongside the HDL wrappers, no need to rebuild on the target:
 
 ```bash
 make dist     # build/dist/libvga_monitor_{dpi,vhpi}.{so,dylib} (+ the HDL wrappers)
@@ -412,7 +414,7 @@ instead of compiling there.
 
 ### Icarus glibc note
 
-The `.vpi` links no display toolkit — only libc/libstdc++. One portability bit
+The `.vpi` links no display toolkit, only libc/libstdc++. One portability bit
 remains for simulators that bundle an **older glibc** than your compiler (e.g.
 oss-cad-suite's `vvp`): [v/glibc_compat.c](v/glibc_compat.c) +
 `-Wl,--wrap=__isoc23_strtol`, plus the Makefile detecting that layout and running
