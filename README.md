@@ -1,38 +1,105 @@
 # VGA Monitor Hardware Simulation (DPI/VPI/VHPI)
 
-Simulate a VGA display in software instead of wiring an FPGA to a physical
-monitor. Your HDL design drives ordinary VGA signaling (`r, g, b, hsync, vsync`)
-and a software "monitor" reconstructs the image and **streams it as raw rgb24
-over TCP to a standard viewer** (e.g. `ffplay`) — like plugging a cable into a
+Watch your HDL design's VGA output in software — no FPGA, no physical monitor.
+Wire your design's VGA signals (`r, g, b, hsync, vsync`) into a drop-in
+`vga_monitor` module; it reconstructs the image and **streams it as raw rgb24
+over TCP to any standard viewer** (e.g. `ffplay`) — like plugging a cable into a
 real monitor, except the cable is a socket.
 
-There is **one monitor**: it takes **no clock and no parameters**. Wire nothing
-but the VGA signaling into it and it recovers everything from the signal itself —
-sync polarity, the pixel clock, the active resolution and offset — reconstructs
-the framebuffer in memory, and sends each finished frame down the socket. It
-locks the way a real monitor's PLL does: the line period comes from HSYNC, the
-lines-per-frame and sync ratio are matched to a standard VGA mode, and the dot
-clock and active window follow from that mode. Each pixel is then sampled a
-quarter period in, clear of the edge transitions. **No windowing toolkit is
-linked into the simulator process**, so the in-process artifact is tiny and
-portable (libc/libstdc++ only); the viewer is a separate, off-the-shelf program
-that can even run on another machine.
+One C++ backend drives **every major HDL simulator**, across SystemVerilog,
+VHDL, and Verilog, on Linux, macOS, and Windows — and every path reconstructs a
+**byte-identical** frame.
 
-The same simulator-agnostic C++ backend ([backend/vga_monitor.cpp](backend/vga_monitor.cpp))
-drives every simulator through three thin foreign-interface shims:
+## Why use it
 
-- **SystemVerilog** — DPI-C ([sv/](sv/)): Verilator, Questa/ModelSim, Vivado XSim.
-- **VHDL** — VHPIDIRECT ([vhdl/](vhdl/)): GHDL, NVC.
-- **Verilog** — VPI ([v/](v/)): Icarus Verilog.
+- **Zero configuration.** The monitor takes **no clock and no parameters**. Wire
+  only the VGA signaling and it recovers everything from the signal itself — sync
+  polarity, pixel clock, active resolution and offset — locking the way a real
+  monitor's PLL does.
+- **No GUI in the simulator.** No windowing toolkit is linked into the simulator
+  process, so the in-process artifact is tiny and portable (libc/libstdc++ only).
+  The viewer is a separate, off-the-shelf program that can run on another machine.
+- **Nothing to install to *use* it.** Download the prebuilt artifact for your
+  OS/arch and go — no C++ toolchain, no extra libraries on the simulator side.
+- **Drop in anywhere.** The same module instantiates anywhere in your hierarchy
+  in SystemVerilog, VHDL, or Verilog. Multiple instances stream to `port+i`, one
+  viewer each.
+- **Cross-simulator equivalence, proven.** The end-to-end test grabs a frame off
+  the socket through the real viewer path and diffs it byte-for-byte against the
+  golden in [golden/](golden/) — so a passing run is also a cross-simulator
+  equivalence proof.
 
-All paths reconstruct a **byte-identical** frame. The end-to-end test has
-`ffmpeg` grab a frame off the socket and compares it against the *same* golden
-image in [golden/](golden/), so a pass is also a cross-simulator equivalence
-proof — through the real viewer path.
+## Compatibility
 
-Because the timing is recovered from the sync signals alone (never from the RGB
-content), any image — flat, coarse, or one that doesn't reach its own active
-edges — locks identically and is shown at its full mode resolution.
+The same simulator-agnostic backend
+([backend/vga_monitor.cpp](backend/vga_monitor.cpp)) reaches every simulator
+through three thin foreign-interface shims — one per HDL:
+
+```mermaid
+flowchart TD
+    BE["Shared C++ backend<br/>backend/vga_monitor.cpp<br/>(reconstruct + stream)"]
+    BE --> DPI["DPI-C shim · SystemVerilog<br/>(sv/)"]
+    BE --> VHPI["VHPIDIRECT shim · VHDL<br/>(vhdl/)"]
+    BE --> VPI["VPI shim · Verilog<br/>(v/)"]
+    DPI --> VL["Verilator"]
+    DPI --> QU["Questa / ModelSim"]
+    DPI --> XS["Vivado XSim"]
+    VHPI --> GH["GHDL"]
+    VHPI --> NV["NVC"]
+    VPI --> IC["Icarus Verilog"]
+```
+
+| Simulator | HDL | Interface | Linux | macOS | Windows |
+| --- | --- | --- | :-: | :-: | :-: |
+| [Verilator](#verilator) | SystemVerilog | DPI-C | ✅ | ✅ | ✅ MinGW |
+| [Questa / ModelSim](#questa--modelsim) | SystemVerilog | DPI-C | ✅ | — | ✅ MSVC |
+| [Vivado XSim](#vivado-xsim) | SystemVerilog | DPI-C | ✅ | — | ✅ MinGW |
+| [GHDL](#ghdl) | VHDL | VHPIDIRECT | ✅ | ✅ | —¹ |
+| [NVC](#nvc) | VHDL | VHPIDIRECT | ✅ | ✅ | ✅ MinGW |
+| [Icarus Verilog](#verilog--vpi) | Verilog | VPI | ✅ | —² | —² |
+
+CI publishes artifacts for **Linux x86_64/arm64, macOS arm64/x86_64, and Windows
+x86_64**. On Windows, pick the bundle matching your simulator's ABI:
+`windows-x86_64` (**MSVC**, for Questa) or `windows-x86_64-mingw` (**MinGW**, for
+Verilator / NVC / Vivado XSim) — see [Getting the monitor](#getting-the-monitor-no-dependencies).
+
+¹ On Windows the only packaged GHDL is the mcode backend, which can't link a
+  VHPIDIRECT library (see [the mcode note](#ghdl-for-the-vhdl-flow)). For VHDL on
+  Windows use NVC, or run the design in Questa/XSim via the SystemVerilog DPI
+  wrapper.
+² No `.vpi` is published for macOS/Windows yet.
+
+## How it fits in your design
+
+The monitor is a drop-in module wired only to the VGA signaling. It sits beside
+your design in the same simulator process and streams each finished frame out
+over a socket to a viewer that can run on another machine:
+
+```mermaid
+flowchart LR
+    subgraph SIMPROC["HDL simulator process"]
+        DUT["Your HDL design<br/>(VGA timing + pixels)"]
+        MON["vga_monitor<br/>(reconstruct framebuffer)"]
+        DUT -->|"r, g, b,<br/>hsync, vsync"| MON
+    end
+    MON -. "raw rgb24 over TCP<br/>(instance i → port+i)" .-> VIEW["ffplay / mpv / VLC<br/>(any reachable machine)"]
+```
+
+Instantiate it anywhere in your hierarchy, wired only to the VGA signals:
+
+```systemverilog
+vga_monitor m (.r, .g, .b, .hsync, .vsync);   // SystemVerilog (sv/)
+```
+```vhdl
+mon : entity work.vga_monitor                  -- VHDL (vhdl/)
+    port map (r => red, g => green, b => blue, hsync => h_sync, vsync => v_sync);
+```
+```verilog
+vga_monitor m (.r(red), .g(green), .b(blue), .hsync(h_sync), .vsync(v_sync)); // Verilog (v/)
+```
+
+Multiple instances are supported; instance *i* (by open order) streams to
+`port+i`, so each gets its own viewer.
 
 ## Layout
 
@@ -47,22 +114,6 @@ examples/  vga_signal_generator / gradient_source           VGA timing + pattern
 golden/    gradient_640x480.ppm                 reference frame for the e2e test
 tests/     stream_e2e.py                        ffmpeg-grab-off-socket vs golden
 Makefile                                        per-simulator stream targets
-```
-
-The monitor is the same drop-in module in each language — instantiate it
-**anywhere** in your hierarchy, wired only to the VGA signaling. Multiple
-instances are supported; instance *i* (by open order) streams to `port+i`, so
-each gets its own viewer.
-
-```systemverilog
-vga_monitor m (.r, .g, .b, .hsync, .vsync);   // SystemVerilog (sv/)
-```
-```vhdl
-mon : entity work.vga_monitor                  -- VHDL (vhdl/)
-    port map (r => red, g => green, b => blue, hsync => h_sync, vsync => v_sync);
-```
-```verilog
-vga_monitor m (.r(red), .g(green), .b(blue), .hsync(h_sync), .vsync(v_sync)); // Verilog (v/)
 ```
 
 ---
@@ -91,7 +142,7 @@ ships **two** bundles — pick the one matching your simulator's toolchain ABI:
 | `libvga_monitor_dpi.{so,dylib,dll}` | SystemVerilog simulators (DPI-C) |
 | `libvga_monitor_vhpi.{so,dylib}` / `vga_monitor_vhpi.dll` | VHDL simulators (VHPIDIRECT) |
 | `vga_monitor.vpi` (Linux bundle) | Verilog simulators (VPI) |
-| `vga_monitor_dpi.a` (MinGW bundle) | Vivado XSim — a tiny DPI trampoline its GCC links, which loads the DLL at run time (see [Vivado XSim](#vivado-xsim)) |
+| `vga_monitor_dpi.a` (MinGW bundle) | Vivado XSim — the shim XSim's GCC links (see [Vivado XSim](#vivado-xsim)) |
 | `libvga_monitor_{dpi,vhpi}.dll.a` (MinGW bundle) | import libraries for MinGW-ABI tools that *link* the DLL (Verilator, GHDL); runtime loaders like NVC don't need them |
 | `vga_monitor.sv` / `.vhdl` + `_pkg.vhdl` / `.v` | the HDL wrapper to add to your sources |
 
@@ -138,9 +189,11 @@ Alternatives that also read raw rgb24: `mpv`, VLC, GStreamer.
 
 The flow is the same for every simulator:
 
-1. **Wire** the monitor into your design (one line — see the snippets above).
-2. **Start a viewer** (it listens — see [A viewer, per OS](#a-viewer-per-os)).
-3. **Run your simulator** with `VGA_MONITOR_STREAM=host:port` set.
+1. **Get the monitor** for your platform — the prebuilt library + HDL wrapper (see
+   [Getting the monitor](#getting-the-monitor-no-dependencies)).
+2. **Wire** the monitor into your design (one line — see the snippets above).
+3. **Start a viewer** (it listens — see [A viewer, per OS](#a-viewer-per-os)).
+4. **Run your simulator** with `VGA_MONITOR_STREAM=host:port` set.
 
 The frame size is fixed once geometry locks, so a standard viewer needs the
 resolution up front (`-video_size`); the monitor logs the locked geometry
@@ -159,7 +212,8 @@ streaming to `ffplay` on your laptop. On Windows set the variable with
 
 Add the wrapper that matches your HDL and point your simulator at the prebuilt
 library for the interface it speaks. Pick the section below for your flow. In the
-commands, `<dist>` is the directory holding the artifact you downloaded.
+commands, `<dist>` is the directory holding the
+[downloaded artifact](#getting-the-monitor-no-dependencies).
 
 ## SystemVerilog — DPI-C
 
@@ -168,7 +222,9 @@ For **Verilator, Questa/ModelSim, Vivado XSim** and any other DPI simulator. Add
 `-sv_lib` takes the base name **without** the `lib` prefix or extension
 (`vga_monitor_dpi`).
 
-**Verilator** — link the library at build time, then run:
+### Verilator
+
+Link the library at build time, then run:
 
 ```bash
 verilator --binary --timing -j 0 --top-module my_tb \
@@ -177,7 +233,9 @@ verilator --binary --timing -j 0 --top-module my_tb \
 LD_LIBRARY_PATH=<dist> VGA_MONITOR_STREAM=127.0.0.1:5000 ./obj_dir/my_tb
 ```
 
-**Questa / ModelSim** — load the library at `vsim` time:
+### Questa / ModelSim
+
+Load the library at `vsim` time:
 
 ```bash
 vlog my_tb.sv my_design.sv vga_monitor.sv
@@ -185,13 +243,11 @@ VGA_MONITOR_STREAM=127.0.0.1:5000 \
     vsim -c my_tb -sv_lib <dist>/vga_monitor_dpi -do "run -all; quit"
 ```
 
-<a name="vivado-xsim"></a>
-**Vivado XSim** — use the **`windows-x86_64-mingw`** bundle. XSim links DPI
-through its own bundled GCC, which won't link the real library (the MSVC DLL is
-rejected and a MinGW `.a` of the C++ backend fails on its libstdc++/winsock
-ABI). So the bundle ships **`vga_monitor_dpi.a`**, a tiny dependency-free
-trampoline (kernel32 only) that XSim's GCC links cleanly and that loads
-`vga_monitor_dpi.dll` at run time. `-sv_root` is its directory:
+### Vivado XSim
+
+Use the **`windows-x86_64-mingw`** bundle. Link `-sv_lib vga_monitor_dpi` with
+`-sv_root` pointing at the bundle directory, and keep that directory on `PATH` at
+run time:
 
 ```bash
 xvlog -sv my_tb.sv my_design.sv vga_monitor.sv
@@ -199,10 +255,9 @@ xelab my_tb -s sim -sv_root <dist> -sv_lib vga_monitor_dpi
 LD_LIBRARY_PATH=<dist> VGA_MONITOR_STREAM=127.0.0.1:5000 xsim sim -R   # <dist> on PATH (Windows)
 ```
 
-The trampoline loads `vga_monitor_dpi.dll` by default; for a versioned release
-point it at the versioned file with `VGA_MONITOR_DLL=vga_monitor_dpi_v1_4_0.dll`.
-(`xsc`/XSim aren't installable in CI, so this path is verified manually, not in
-the test suite.)
+For a versioned release, point it at the versioned DLL with
+`VGA_MONITOR_DLL=vga_monitor_dpi_v1_4_0.dll`. (`xsc`/XSim aren't installable in
+CI, so this path is verified manually, not in the test suite.)
 
 ## VHDL — VHPIDIRECT
 
@@ -217,7 +272,9 @@ alongside your design and supply `libvga_monitor_vhpi.{so,dylib}` (self-containe
 > `vga_monitor` module instead and use the DPI library
 > ([SystemVerilog — DPI-C](#systemverilog--dpi-c)).
 
-**GHDL** — link the library at elaboration:
+### GHDL
+
+Link the library at elaboration:
 
 ```bash
 ghdl -a --std=08 vga_monitor_pkg.vhdl vga_monitor.vhdl my_design.vhdl my_tb.vhdl
@@ -225,7 +282,9 @@ ghdl -e --std=08 -Wl,-L<dist> -Wl,-lvga_monitor_vhpi my_tb
 LD_LIBRARY_PATH=<dist> VGA_MONITOR_STREAM=127.0.0.1:5000 ./my_tb
 ```
 
-**NVC** — load the library at run time:
+### NVC
+
+Load the library at run time:
 
 ```bash
 nvc --std=2008 -a vga_monitor_pkg.vhdl vga_monitor.vhdl my_design.vhdl my_tb.vhdl
