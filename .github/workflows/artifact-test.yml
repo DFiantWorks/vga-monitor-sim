@@ -59,11 +59,11 @@ jobs:
       - name: Test prebuilt artifacts against all available simulators
         run: python3 tests/stream_e2e.py --dist dist
 
-  # Windows (MinGW) bundle: Verilator (DPI, links the shipped import lib), NVC
-  # (VHPI, loaded at runtime with --load), and Icarus (VPI, loads the shipped
-  # .vpi). Not run here:
-  #   - GHDL/VHPI: MSYS2's ghdl is the mcode backend (unsupported -- see Makefile).
-  #   - the MSVC bundle: only commercial sims (Questa) consume it.
+  # Windows (MinGW) bundle: Verilator (DPI, links the shipped import lib), GHDL +
+  # NVC (VHPI -- GHDL links the import lib at elaboration, NVC loads the DLL with
+  # --load), and Icarus (VPI, loads the shipped .vpi). GHDL must be the LLVM
+  # backend (mcode has no link step -- see Makefile); MSYS2 ships ghdl-llvm.
+  # Not run here: the MSVC bundle -- only commercial sims (Questa) consume it.
   artifact-test-windows:
     name: artifact-test (windows-x86_64-mingw)
     runs-on: windows-latest
@@ -90,12 +90,14 @@ jobs:
             make
             mingw-w64-x86_64-python
             mingw-w64-x86_64-verilator
+            mingw-w64-x86_64-ghdl-llvm
             mingw-w64-x86_64-iverilog
             mingw-w64-x86_64-ffmpeg
-      - name: Test prebuilt artifacts (Verilator/DPI, NVC/VHPI runtime --load, Icarus/VPI)
+      - name: Test prebuilt artifacts (Verilator/DPI, GHDL+NVC/VHPI, Icarus/VPI)
         shell: msys2 {0}
         run: |
           verilator --version
+          ghdl --version | head -1
           nvc --version
           iverilog -V | head -1
-          python3 tests/stream_e2e.py --dist dist --sim dpi,nvc,vpi
+          python3 tests/stream_e2e.py --dist dist --sim dpi,vhpi,nvc,vpi

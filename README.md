@@ -54,19 +54,19 @@ flowchart TD
 | [Verilator](#verilator) | SystemVerilog | DPI-C | ✅ | ✅ | ✅ MinGW |
 | [Questa / ModelSim](#questa--modelsim) | SystemVerilog | DPI-C | ✅ | — | ✅ MSVC |
 | [Vivado XSim](#vivado-xsim) | SystemVerilog | DPI-C | ✅ | — | ✅ MinGW |
-| [GHDL](#ghdl) | VHDL | VHPIDIRECT | ✅ | ✅ | —¹ |
+| [GHDL](#ghdl) | VHDL | VHPIDIRECT | ✅ | ✅ | ✅ MinGW¹ |
 | [NVC](#nvc) | VHDL | VHPIDIRECT | ✅ | ✅ | ✅ MinGW |
 | [Icarus Verilog](#verilog--vpi) | Verilog | VPI | ✅ | ✅ | ✅ MinGW |
 
 CI publishes artifacts for **Linux x86_64/arm64, macOS arm64/x86_64, and Windows
 x86_64**. On Windows, pick the bundle matching your simulator's ABI:
 `windows-x86_64` (**MSVC**, for Questa) or `windows-x86_64-mingw` (**MinGW**, for
-Verilator / NVC / Vivado XSim); see [Getting the monitor](#getting-the-monitor-no-dependencies).
+Verilator / GHDL / NVC / Icarus / Vivado XSim); see
+[Getting the monitor](#getting-the-monitor-no-dependencies).
 
-¹ On Windows the only packaged GHDL is the mcode backend, which can't link a
-  VHPIDIRECT library (see [the mcode note](#ghdl-for-the-vhdl-flow)). For VHDL on
-  Windows use NVC, or run the design in Questa/XSim via the SystemVerilog DPI
-  wrapper.
+¹ On Windows use the **LLVM**-backend GHDL (`mingw-w64-x86_64-ghdl-llvm`); the
+  mcode backend can't link a VHPIDIRECT library (see
+  [the mcode note](#ghdl-for-the-vhdl-flow)).
 
 ## How it fits in your design
 
@@ -264,7 +264,9 @@ CI, so this path is verified manually, not in the test suite.)
 For **GHDL** and **NVC**. Analyze `vga_monitor_pkg.vhdl` + `vga_monitor.vhdl`
 alongside your design and supply `libvga_monitor_vhpi.{so,dylib}` (self-contained,
 libstdc++/libgcc folded in). On Windows use `vga_monitor_vhpi.dll` from the
-**`windows-x86_64-mingw`** bundle, since GHDL and NVC are MinGW-based there.
+**`windows-x86_64-mingw`** bundle, since GHDL and NVC are MinGW-based there; with
+GHDL pick the **LLVM** backend (`mingw-w64-x86_64-ghdl-llvm`), as mcode can't link
+the library.
 
 > The VHPIDIRECT wrapper binds via GHDL's `foreign` convention, which **GHDL and
 > NVC** implement. For a VHDL design in **Questa or Vivado XSim**, don't use this
