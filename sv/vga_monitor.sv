@@ -25,6 +25,8 @@
 //
 // COLOR_BITS only sizes the r/g/b ports; it carries no timing information.
 
+`timescale 1ns/1ps
+
 module vga_monitor #(
     parameter string NAME       = "VGA Monitor (auto)",
     parameter int    COLOR_BITS = 8
@@ -51,10 +53,14 @@ module vga_monitor #(
     chandle handle;
 
     function automatic byte unsigned to8(input logic [COLOR_BITS-1:0] c);
+        // The shift operand is COLOR_BITS wide while the result is 8 wide; the
+        // byte' cast resizes deliberately, so silence Verilator's width warning.
+        /* verilator lint_off WIDTHEXPAND */
         if (COLOR_BITS >= 8)
             return byte'(c >> (COLOR_BITS - 8));
         else
             return byte'(c << (8 - COLOR_BITS));
+        /* verilator lint_on WIDTHEXPAND */
     endfunction
 
     initial handle = vga_monitor_open(NAME);

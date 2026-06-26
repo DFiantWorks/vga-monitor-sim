@@ -5,7 +5,9 @@ name: Test (reusable)
 # Reused by ci.yml (PR / push) and release.yml (gate a tag before publishing).
 # Run on x86_64 and arm64 Linux to prove cross-architecture behavior.
 #
-# GHDL uses the llvm backend (mcode is not supported -- see the Makefile):
+# The from-source flow links the C backend at elaboration, so GHDL uses the
+# llvm/gcc backend (mcode loads a PREBUILT library instead -- tested in
+# artifact-test.yml, not here):
 #   * x86_64 -- modern GHDL via ghdl/setup-ghdl.
 #   * arm64  -- apt's ghdl-llvm (ghdl/setup-ghdl ships no arm64 asset).
 on:
@@ -45,3 +47,5 @@ jobs:
         run: verilator --version; iverilog -V | head -1; ghdl --version | head -1; nvc --version | head -1; ffmpeg -version | head -1
       - name: End-to-end stream test (DPI / VHPI / NVC / VPI vs golden)
         run: make stream-test
+      - name: COLOR_BITS=4 end-to-end test (VPI vs 4-bit golden)
+        run: make color-bits-test

@@ -31,14 +31,17 @@ VHDL_DUT := examples/vga_signal_generator.vhdl examples/gradient_source.vhdl
 
 .PHONY: stream-dpi stream-two stream-vhpi stream-nvc stream-vpi stream-test \
         stream-dpi-dist stream-vhpi-dist stream-nvc-dist stream-vpi-dist \
-        dist dist-vpi dist-test clean
+        stream-mcode-dist \
+        dist dist-vpi dist-test clean \
+        stream-vpi-c4 color-bits-test
 
 # ---- GHDL backend ----------------------------------------------------------
-# The VHDL flow uses GHDL's gcc or llvm backend: the foreign C backend is linked
-# into the design at elaboration (ghdl -e -Wl,...). The mcode backend is NOT
-# supported -- it has no link step and would require naming the shared library
-# inside the VHDL `foreign` attribute, which NVC (sharing the same package file)
-# does not accept. Override the binary with GHDL=/path/to/ghdl.
+# The from-source VHDL flow uses GHDL's gcc or llvm backend: the foreign C
+# backend is linked into the design at elaboration (ghdl -e -Wl,...), which the
+# canonical vga_monitor_pkg.vhdl supports (and so does NVC). The mcode backend
+# has no link step, so it instead LOADS a prebuilt library named in the
+# `foreign` string -- see `dist` (generates vga_monitor_pkg_mcode.vhdl) and
+# `stream-mcode-dist`. Override the binary with GHDL=/path/to/ghdl.
 GHDL ?= ghdl
 
 # ---- DPI / Verilator, built WITHOUT --timing (clock from sim_main) ----------
@@ -112,6 +115,10 @@ dist-test:
 # No simulator dependency. A DPI simulator loads libvga_monitor_dpi alongside
 # sv/vga_monitor.sv; GHDL/NVC load libvga_monitor_vhpi. libstdc++/libgcc are
 # folded in for portability. Output: $(DIST)/
+#
+# Also emits vga_monitor_pkg_mcode.vhdl: the canonical package leaves the library
+# implicit (gcc/llvm GHDL + NVC link/load it), but mcode-backend GHDL has no link
+# step, so this drop-in variant names $(VHPI_LIB) in each `foreign` string.
 CXX ?= c++
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
@@ -146,6 +153,8 @@ dist:
 	$(CXX) -O2 -fPIC $(DIST_FLAGS) $(INST_VHPI) $(BACKEND) vhdl/vga_monitor_vhpi.cpp $(DIST_LIBS) -o $(DIST)/$(VHPI_LIB)
 	cp sv/vga_monitor.sv vhdl/vga_monitor.vhdl vhdl/vga_monitor_pkg.vhdl \
 	   v/vga_monitor.v $(DIST)/
+	sed -E 's/(is "VHPIDIRECT) (vhpi_monitor_[a-z]+")/\1 $(VHPI_LIB) \2/' \
+	   vhdl/vga_monitor_pkg.vhdl > $(DIST)/vga_monitor_pkg_mcode.vhdl
 	@echo "built $(DIST)/$(DPI_LIB) and $(DIST)/$(VHPI_LIB)"
 
 # Icarus VPI module -- needs iverilog's headers, so it's split from `dist`.
@@ -187,6 +196,19 @@ stream-vhpi-dist:
 		-Wl,-L$(DIST_ABS) -Wl,-lvga_monitor_vhpi -Wl,-Wl,-rpath,$(DIST_ABS) $(MODULE)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-vhpi-dist/$(MODULE)
 
+# mcode-backend GHDL: no link step, so it LOADS the prebuilt VHPI library named
+# in the generated _mcode wrapper's `foreign` strings. The library must be on
+# the OS loader path -- the e2e harness adds $(DIST) to PATH/LD_LIBRARY_PATH.
+# VGA_MONITOR_FRAMES (set by the harness) ends the run after N frames; the
+# --stop-time is a backstop in case geometry never locks. ghdl-mcode required
+# here (the canonical -Wl link path is stream-vhpi-dist).
+stream-mcode-dist:
+	mkdir -p $(BUILD)/stream-mcode-dist
+	$(GHDL) -a --std=08 --workdir=$(BUILD)/stream-mcode-dist \
+		$(DIST)/vga_monitor_pkg_mcode.vhdl vhdl/vga_monitor.vhdl $(VHDL_DUT) examples/tb_gradient.vhdl
+	VGA_MONITOR_STREAM=$(STREAM) $(GHDL) --elab-run --std=08 \
+		--workdir=$(BUILD)/stream-mcode-dist $(MODULE) --stop-time=500ms
+
 stream-nvc-dist:
 	mkdir -p $(BUILD)/stream-nvc-dist
 	nvc --std=2008 --work=$(BUILD)/stream-nvc-dist/work -a \
@@ -212,6 +234,25 @@ stream-nvc:
 	nvc --std=2008 --work=$(BUILD)/stream-nvc/work -e $(MODULE)
 	VGA_MONITOR_STREAM=$(STREAM) \
 		nvc --std=2008 --work=$(BUILD)/stream-nvc/work -r $(MODULE) --load $(BUILD)/stream-nvc/$(VHPI_LIB)
+
+# ---- COLOR_BITS=4 end-to-end test (one simulator, a 4-bit golden) ----------
+# The same reconstruction path as stream-vpi, but the gradient is driven through
+# a 4-bit color width (tb_gradient_c4). The monitor left-justifies each 4-bit
+# channel back to 8 bits, so the streamed frame is the gradient quantized to 16
+# levels per channel -- compared against its own golden (gradient_640x480_c4).
+# Only the VPI/Icarus path is exercised: the backend is simulator-agnostic, so a
+# single simulator covers the COLOR_BITS parameter. Run via:
+#   make color-bits-test
+stream-vpi-c4:
+	mkdir -p $(BUILD)/stream-vpi-c4
+	$(VPI_BUILD) -o $(BUILD)/stream-vpi-c4/vga_monitor.vpi
+	iverilog -g2012 -o $(BUILD)/stream-vpi-c4/tb_gradient_c4.vvp -s tb_gradient_c4 \
+		examples/tb_gradient_c4.v v/vga_monitor.v $(SV_DUT)
+	VGA_MONITOR_STREAM=$(STREAM) \
+		$(VVP_RUN) -M$(BUILD)/stream-vpi-c4 -m vga_monitor $(BUILD)/stream-vpi-c4/tb_gradient_c4.vvp
+
+color-bits-test:
+	python3 tests/stream_e2e.py --sim vpi --variant c4
 
 clean:
 	rm -rf $(BUILD) obj_dir

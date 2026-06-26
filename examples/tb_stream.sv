@@ -5,6 +5,8 @@
 // sim_main_stream.cpp. With VGA_MONITOR_STREAM=host:port set, the monitor sends
 // each finished frame as raw rgb24 to a standard viewer (e.g. ffplay).
 
+`timescale 1ns/1ps
+
 module tb_stream (
     input logic clk,
     input logic reset

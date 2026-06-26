@@ -9,7 +9,7 @@ on:
   workflow_call:
     inputs:
       package_release:
-        description: Also stamp versioned filenames and upload release-* archives.
+        description: Also pack per-platform release-* archives (version in the folder name).
         type: boolean
         default: false
 
@@ -89,8 +89,9 @@ jobs:
         run: |
           mkdir -p build/dist
           # --out-implib: MinGW-ABI tools that LINK the DLL (Verilator/DPI,
-          # GHDL/VHPI) need an import library; runtime loaders (NVC --load) don't.
-          # Shipped in the unversioned bundle only -- see ci/package-release.sh.
+          # GHDL/VHPI llvm/gcc) need an import library; runtime loaders
+          # (NVC --load, GHDL mcode) don't. The folder-based release keeps
+          # filenames stable, so the import lib now ships in every bundle.
           g++ -O2 -shared -static \
             backend/vga_monitor.cpp -lws2_32 \
             -Wl,--out-implib,build/dist/libvga_monitor_dpi.dll.a \
@@ -118,6 +119,19 @@ jobs:
             -o build/dist/vga_monitor.vpi
           cp sv/vga_monitor.sv vhdl/vga_monitor.vhdl vhdl/vga_monitor_pkg.vhdl \
              v/vga_monitor.v build/dist/
+          ls -l build/dist
+
+      # mcode-backend GHDL has no link step, so it loads the prebuilt VHPI DLL
+      # named in this wrapper's `foreign` strings (the canonical package leaves
+      # the library implicit for gcc/llvm GHDL + NVC). POSIX bundles get this
+      # from `make dist`; generate it here for both Windows bundles (token is
+      # the Windows DLL name for both). `shell: bash` is Git Bash on the runner.
+      - name: Generate mcode VHDL wrapper (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          sed -E 's/(is "VHPIDIRECT) (vhpi_monitor_[a-z]+")/\1 vga_monitor_vhpi.dll \2/' \
+            build/dist/vga_monitor_pkg.vhdl > build/dist/vga_monitor_pkg_mcode.vhdl
           ls -l build/dist
 
       - name: Show artifact contents

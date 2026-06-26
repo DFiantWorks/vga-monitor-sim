@@ -16,6 +16,8 @@
 -- Limitations of needing zero hints: the pixel period is recovered from
 -- pixel-granular detail (a flat image has none), and the detected area is the
 -- extent of non-blank video.
+--
+-- COLOR_BITS only sizes the r/g/b ports; it carries no timing information.
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
@@ -23,10 +25,13 @@ use IEEE.NUMERIC_STD.ALL;
 use work.vga_monitor_pkg.all;
 
 entity vga_monitor is
+    generic (
+        COLOR_BITS : integer := 8
+    );
     port (
-        r     : in std_logic_vector(7 downto 0);
-        g     : in std_logic_vector(7 downto 0);
-        b     : in std_logic_vector(7 downto 0);
+        r     : in std_logic_vector(COLOR_BITS - 1 downto 0);
+        g     : in std_logic_vector(COLOR_BITS - 1 downto 0);
+        b     : in std_logic_vector(COLOR_BITS - 1 downto 0);
         hsync : in std_logic;
         vsync : in std_logic
     );
@@ -41,9 +46,7 @@ begin
             mon_open(handle);
         end if;
         mon_event(handle, real(now / 1 ns),
-                       to_integer(unsigned(r)),
-                       to_integer(unsigned(g)),
-                       to_integer(unsigned(b)),
+                       to8(r), to8(g), to8(b),
                        sl2i(hsync), sl2i(vsync));
     end process;
 end architecture;

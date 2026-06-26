@@ -5,6 +5,8 @@
 // monitor locks a stable 640x480; pixels are black only while blanked, which is
 // what lets the monitor find the active box.
 
+`timescale 1ns/1ps
+
 module scroll_source (
     input  logic        video_on,
     input  logic [11:0] pixel_x,

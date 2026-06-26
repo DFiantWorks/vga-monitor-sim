@@ -102,8 +102,9 @@ jobs:
           python3 tests/stream_e2e.py --dist dist --sim dpi,nvc,vpi
 
   # Windows GHDL/VHPI, isolated (see note above). GHDL's LLVM backend links the
-  # shipped VHPI import lib at elaboration and loads the DLL at run time; mcode
-  # has no link step, so ghdl-llvm is required.
+  # shipped VHPI import lib at elaboration and loads the DLL at run time. The
+  # mcode backend (no link step) loads the DLL via the generated _mcode wrapper
+  # instead -- exercised in its own jobs below.
   artifact-test-windows-ghdl:
     name: artifact-test (windows-x86_64-mingw, GHDL)
     runs-on: windows-latest
@@ -129,3 +130,59 @@ jobs:
         run: |
           ghdl --version | head -1
           python3 tests/stream_e2e.py --dist dist --sim vhpi
+
+  # GHDL mcode backend (x86_64 only -- mcode has no arm64/macOS codegen). No link
+  # step: it loads the prebuilt VHPI library named in the generated _mcode
+  # wrapper. Separate from the gcc/llvm jobs because one `ghdl` install is one
+  # backend. Linux here; Windows below.
+  artifact-test-mcode:
+    name: artifact-test (linux-x86_64, GHDL mcode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download prebuilt artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: vga-monitor-linux-x86_64
+          path: dist
+      - name: Install viewer + net tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends make ffmpeg iproute2
+      - name: Setup GHDL (mcode)
+        uses: ghdl/setup-ghdl@v1
+        with:
+          backend: mcode
+      - name: Test prebuilt artifact (GHDL/VHPI, mcode backend)
+        run: |
+          ghdl --version | head -1
+          python3 tests/stream_e2e.py --dist dist --sim mcode
+
+  # Windows GHDL mcode. Install the mcode package EXPLICITLY: the bare
+  # mingw-w64-x86_64-ghdl name resolves to the LLVM provider (used in the job
+  # above), so it must be -ghdl-mcode here, not -ghdl.
+  artifact-test-windows-mcode:
+    name: artifact-test (windows-x86_64-mingw, GHDL mcode)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download prebuilt artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: vga-monitor-windows-x86_64-mingw
+          path: dist
+      - name: Set up MSYS2 (MinGW64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-ghdl-mcode
+            mingw-w64-x86_64-ffmpeg
+      - name: Test prebuilt artifact (GHDL/VHPI, mcode backend)
+        shell: msys2 {0}
+        run: |
+          ghdl --version | head -1
+          python3 tests/stream_e2e.py --dist dist --sim mcode

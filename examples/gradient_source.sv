@@ -11,6 +11,8 @@
 // Combinational: r/g/b are a pure function of the pixel coordinates, kept
 // phase-aligned with the sync signals from vga_signal_generator.
 
+`timescale 1ns/1ps
+
 module gradient_source (
     input  logic        video_on,
     input  logic [11:0] pixel_x,

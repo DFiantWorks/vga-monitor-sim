@@ -12,10 +12,12 @@
 # rather than a bespoke reader.
 #
 # Simulators (each maps to one `make` target):
-#   dpi  -> Verilator (SystemVerilog / DPI-C)
-#   vhpi -> GHDL      (VHDL / VHPIDIRECT)
-#   nvc  -> NVC       (VHDL / VHPIDIRECT)
-#   vpi  -> Icarus    (Verilog / VPI)
+#   dpi   -> Verilator (SystemVerilog / DPI-C)
+#   vhpi  -> GHDL gcc/llvm (VHDL / VHPIDIRECT, library linked at elaboration)
+#   mcode -> GHDL mcode    (VHDL / VHPIDIRECT, library loaded via _mcode wrapper;
+#                           --dist only, since it loads the prebuilt library)
+#   nvc   -> NVC       (VHDL / VHPIDIRECT)
+#   vpi   -> Icarus    (Verilog / VPI)
 # A simulator whose tool is not installed is SKIPPED (so the same run works on
 # Linux/macOS/Windows, each with a different subset of FOSS simulators).
 #
@@ -40,13 +42,22 @@ GOLDEN = ROOT / "golden" / "gradient_640x480.ppm"
 W, H   = 640, 480
 FRAMES = "12"            # > geometry-lock latency (~4 frames); gradient is static
 
+# Optional pattern variants: each maps to a `make` target suffix and its own
+# golden. "" is the default 8-bit gradient; "c4" drives the gradient through a
+# 4-bit color width (COLOR_BITS=4) -- see the Makefile's stream-*-c4 targets.
+VARIANTS = {
+    "":   ("",     GOLDEN),
+    "c4": ("-c4",  ROOT / "golden" / "gradient_640x480_c4.ppm"),
+}
+
 # sim -> (executables that must be on PATH, TCP port). Distinct ports so a
 # leftover socket from one sim can't be mistaken for the next.
 SIMS = {
-    "dpi":  (["verilator"],       5030),
-    "vhpi": (["ghdl"],            5031),
-    "vpi":  (["iverilog", "vvp"], 5032),
-    "nvc":  (["nvc"],             5033),
+    "dpi":   (["verilator"],       5030),
+    "vhpi":  (["ghdl"],            5031),
+    "vpi":   (["iverilog", "vvp"], 5032),
+    "nvc":   (["nvc"],             5033),
+    "mcode": (["ghdl"],            5034),
 }
 
 IS_WINDOWS = os.name == "nt" or "MSYSTEM" in os.environ
@@ -76,14 +87,30 @@ def lib_name(kind: str) -> str:
     return f"libvga_monitor_{kind}.so"
 
 
-# In --dist mode, the prebuilt file each sim consumes from the dist dir.
-def dist_file(sim: str) -> str:
+# In --dist mode, the prebuilt file(s) each sim consumes from the dist dir.
+def dist_files(sim: str) -> list:
     return {
-        "dpi":  lib_name("dpi"),
-        "vhpi": lib_name("vhpi"),
-        "nvc":  lib_name("vhpi"),
-        "vpi":  "vga_monitor.vpi",
+        "dpi":   [lib_name("dpi")],
+        "vhpi":  [lib_name("vhpi")],
+        "nvc":   [lib_name("vhpi")],
+        "vpi":   ["vga_monitor.vpi"],
+        # mcode loads the VHPI library named in the generated wrapper.
+        "mcode": [lib_name("vhpi"), "vga_monitor_pkg_mcode.vhdl"],
     }[sim]
+
+
+def ghdl_backend():
+    """Which GHDL code generator is installed: 'mcode', 'llvm', 'gcc', or None.
+    vhpi (link at elaboration) needs llvm/gcc; mcode (load at run time) needs
+    mcode -- the two are mutually exclusive in one `ghdl` install."""
+    g = which("ghdl")
+    if not g:
+        return None
+    out = subprocess.run([g, "--version"], capture_output=True, text=True).stdout.lower()
+    for be in ("mcode", "llvm", "gcc"):
+        if be in out:
+            return be
+    return "unknown"
 
 
 def port_listening(port: int) -> bool:
@@ -115,11 +142,12 @@ def loader_env(env: dict, dist: str) -> None:
     env[var] = d + os.pathsep + env.get(var, "")
 
 
-def run_one(sim, dist):
+def run_one(sim, dist, variant=""):
     port = SIMS[sim][1]
-    target = f"stream-{sim}-dist" if dist else f"stream-{sim}"
-    grab = Path(f"/tmp/stream_e2e_{sim}.ppm") if not IS_WINDOWS \
-        else Path(os.environ.get("TEMP", ".")) / f"stream_e2e_{sim}.ppm"
+    suffix, golden = VARIANTS[variant]
+    target = f"stream-{sim}-dist" if dist else f"stream-{sim}{suffix}"
+    grab = Path(f"/tmp/stream_e2e_{sim}{suffix}.ppm") if not IS_WINDOWS \
+        else Path(os.environ.get("TEMP", ".")) / f"stream_e2e_{sim}{suffix}.ppm"
     if grab.exists():
         grab.unlink()
 
@@ -159,10 +187,10 @@ def run_one(sim, dist):
         print((sim_proc.stdout + sim_proc.stderr)[-6000:])
         return False
 
-    ok = filecmp.cmp(grab, GOLDEN, shallow=False)
+    ok = filecmp.cmp(grab, golden, shallow=False)
     sz = grab.stat().st_size
     print(f"  {sim}: {'PASS' if ok else 'FAIL'} "
-          f"(ffmpeg grab {sz} B {'==' if ok else '!='} golden {GOLDEN.stat().st_size} B)")
+          f"(ffmpeg grab {sz} B {'==' if ok else '!='} golden {golden.stat().st_size} B)")
     return ok
 
 
@@ -172,7 +200,13 @@ def main() -> int:
                     help="comma-separated subset of: " + ", ".join(SIMS) + " (default all)")
     ap.add_argument("--dist", default=None, metavar="DIR",
                     help="test the prebuilt artifacts in DIR instead of building from source")
+    ap.add_argument("--variant", default="", choices=sorted(VARIANTS),
+                    help="pattern variant: '' (8-bit gradient) or 'c4' (4-bit color width)")
     args = ap.parse_args()
+
+    if args.variant and args.dist:
+        print("error: --variant cannot be combined with --dist")
+        return 2
 
     if not which("ffmpeg"):
         print("error: 'ffmpeg' not found (needed for the end-to-end test)")
@@ -192,10 +226,21 @@ def main() -> int:
     for s in requested:
         tools = SIMS[s][0]
         missing = [t for t in tools if not which(t)]
+        absent = [f for f in dist_files(s) if not (Path(args.dist) / f).exists()] \
+            if args.dist else []
+        # vhpi and mcode share the `ghdl` binary but need OPPOSITE backends:
+        # vhpi links the library at elaboration (gcc/llvm), mcode loads it (mcode).
+        be = ghdl_backend() if s in ("vhpi", "mcode") else None
         if missing:
             skipped.append((s, "missing " + ", ".join(missing)))
-        elif args.dist and not (Path(args.dist) / dist_file(s)).exists():
-            skipped.append((s, f"no {dist_file(s)} in {args.dist}"))
+        elif s == "mcode" and not args.dist:
+            skipped.append((s, "mcode is dist-only (loads the prebuilt library; use --dist)"))
+        elif s == "mcode" and be != "mcode":
+            skipped.append((s, f"ghdl backend is {be}, not mcode"))
+        elif s == "vhpi" and be == "mcode":
+            skipped.append((s, "ghdl backend is mcode, not gcc/llvm (use --sim mcode)"))
+        elif absent:
+            skipped.append((s, f"no {', '.join(absent)} in {args.dist}"))
         else:
             selected.append(s)
 
@@ -207,7 +252,7 @@ def main() -> int:
         print("RESULT: nothing to test (no matching simulator available)")
         return 2
 
-    results = {s: run_one(s, args.dist) for s in selected}
+    results = {s: run_one(s, args.dist, args.variant) for s in selected}
 
     ok = all(results.values())
     print("RESULT:", "all passed" if ok else "FAILURES: " +

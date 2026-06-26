@@ -10,6 +10,8 @@
 // and reset are driven from examples/sim_main.cpp (see the stream-two target),
 // which advances simulation time itself -- the fast, pixel-exact path.
 
+`timescale 1ns/1ps
+
 module tb_two_monitors (
     input logic clk,
     input logic reset

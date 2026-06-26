@@ -4,6 +4,8 @@
 // them. The bars are always non-blank, so the active region stays a stable
 // 640x480 for the auto-detecting monitor (black only while blanked).
 
+`timescale 1ns/1ps
+
 module bars_box_source (
     input  logic        video_on,
     input  logic [11:0] pixel_x,
