@@ -12,10 +12,12 @@
 # rather than a bespoke reader.
 #
 # Simulators (each maps to one `make` target):
-#   dpi  -> Verilator (SystemVerilog / DPI-C)
-#   vhpi -> GHDL      (VHDL / VHPIDIRECT)
-#   nvc  -> NVC       (VHDL / VHPIDIRECT)
-#   vpi  -> Icarus    (Verilog / VPI)
+#   dpi   -> Verilator (SystemVerilog / DPI-C)
+#   vhpi  -> GHDL gcc/llvm (VHDL / VHPIDIRECT, library linked at elaboration)
+#   mcode -> GHDL mcode    (VHDL / VHPIDIRECT, library loaded via _mcode wrapper;
+#                           --dist only, since it loads the prebuilt library)
+#   nvc   -> NVC       (VHDL / VHPIDIRECT)
+#   vpi   -> Icarus    (Verilog / VPI)
 # A simulator whose tool is not installed is SKIPPED (so the same run works on
 # Linux/macOS/Windows, each with a different subset of FOSS simulators).
 #
@@ -51,10 +53,11 @@ VARIANTS = {
 # sim -> (executables that must be on PATH, TCP port). Distinct ports so a
 # leftover socket from one sim can't be mistaken for the next.
 SIMS = {
-    "dpi":  (["verilator"],       5030),
-    "vhpi": (["ghdl"],            5031),
-    "vpi":  (["iverilog", "vvp"], 5032),
-    "nvc":  (["nvc"],             5033),
+    "dpi":   (["verilator"],       5030),
+    "vhpi":  (["ghdl"],            5031),
+    "vpi":   (["iverilog", "vvp"], 5032),
+    "nvc":   (["nvc"],             5033),
+    "mcode": (["ghdl"],            5034),
 }
 
 IS_WINDOWS = os.name == "nt" or "MSYSTEM" in os.environ
@@ -84,14 +87,30 @@ def lib_name(kind: str) -> str:
     return f"libvga_monitor_{kind}.so"
 
 
-# In --dist mode, the prebuilt file each sim consumes from the dist dir.
-def dist_file(sim: str) -> str:
+# In --dist mode, the prebuilt file(s) each sim consumes from the dist dir.
+def dist_files(sim: str) -> list:
     return {
-        "dpi":  lib_name("dpi"),
-        "vhpi": lib_name("vhpi"),
-        "nvc":  lib_name("vhpi"),
-        "vpi":  "vga_monitor.vpi",
+        "dpi":   [lib_name("dpi")],
+        "vhpi":  [lib_name("vhpi")],
+        "nvc":   [lib_name("vhpi")],
+        "vpi":   ["vga_monitor.vpi"],
+        # mcode loads the VHPI library named in the generated wrapper.
+        "mcode": [lib_name("vhpi"), "vga_monitor_pkg_mcode.vhdl"],
     }[sim]
+
+
+def ghdl_backend():
+    """Which GHDL code generator is installed: 'mcode', 'llvm', 'gcc', or None.
+    vhpi (link at elaboration) needs llvm/gcc; mcode (load at run time) needs
+    mcode -- the two are mutually exclusive in one `ghdl` install."""
+    g = which("ghdl")
+    if not g:
+        return None
+    out = subprocess.run([g, "--version"], capture_output=True, text=True).stdout.lower()
+    for be in ("mcode", "llvm", "gcc"):
+        if be in out:
+            return be
+    return "unknown"
 
 
 def port_listening(port: int) -> bool:
@@ -207,10 +226,21 @@ def main() -> int:
     for s in requested:
         tools = SIMS[s][0]
         missing = [t for t in tools if not which(t)]
+        absent = [f for f in dist_files(s) if not (Path(args.dist) / f).exists()] \
+            if args.dist else []
+        # vhpi and mcode share the `ghdl` binary but need OPPOSITE backends:
+        # vhpi links the library at elaboration (gcc/llvm), mcode loads it (mcode).
+        be = ghdl_backend() if s in ("vhpi", "mcode") else None
         if missing:
             skipped.append((s, "missing " + ", ".join(missing)))
-        elif args.dist and not (Path(args.dist) / dist_file(s)).exists():
-            skipped.append((s, f"no {dist_file(s)} in {args.dist}"))
+        elif s == "mcode" and not args.dist:
+            skipped.append((s, "mcode is dist-only (loads the prebuilt library; use --dist)"))
+        elif s == "mcode" and be != "mcode":
+            skipped.append((s, f"ghdl backend is {be}, not mcode"))
+        elif s == "vhpi" and be == "mcode":
+            skipped.append((s, "ghdl backend is mcode, not gcc/llvm (use --sim mcode)"))
+        elif absent:
+            skipped.append((s, f"no {', '.join(absent)} in {args.dist}"))
         else:
             selected.append(s)
 

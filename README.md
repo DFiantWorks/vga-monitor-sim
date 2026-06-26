@@ -65,9 +65,9 @@ x86_64**. On Windows, pick the bundle matching your simulator's ABI:
 Verilator / GHDL / NVC / Icarus / Vivado XSim); see
 [Getting the monitor](#getting-the-monitor-no-dependencies).
 
-¹ On Windows use the **LLVM**-backend GHDL (`mingw-w64-x86_64-ghdl-llvm`); the
-  mcode backend can't link a VHPIDIRECT library (see
-  [the mcode note](#ghdl-for-the-vhdl-flow)).
+¹ On Windows, either GHDL backend works: **LLVM** (`mingw-w64-x86_64-ghdl-llvm`,
+  links the library) or **mcode** (`mingw-w64-x86_64-ghdl`, loads it via the
+  `_mcode` wrapper). See [the GHDL backends note](#ghdl-for-the-vhdl-flow).
 
 ## How it fits in your design
 
@@ -167,18 +167,17 @@ bundles; pick the one matching your simulator's toolchain ABI: `windows-x86_64`
 | `vga_monitor_dpi.a` (MinGW bundle) | Vivado XSim: the shim XSim's GCC links (see [Vivado XSim](#vivado-xsim)) |
 | `libvga_monitor_{dpi,vhpi}.dll.a` (MinGW bundle) | import libraries for MinGW-ABI tools that *link* the DLL (Verilator, GHDL); runtime loaders like NVC don't need them |
 | `vga_monitor.sv` / `.vhdl` + `_pkg.vhdl` / `.v` | the HDL wrapper to add to your sources |
+| `vga_monitor_pkg_mcode.vhdl` | drop-in VHDL package for **mcode**-backend GHDL (names the library in its `foreign` strings; see [GHDL](#ghdl)) |
 
 Tagged releases (`v*`) also attach a per-platform archive
-`vga-monitor-<version>-<platform>.tar.gz` to the GitHub Release, in which every
-file carries a version token (`vga_monitor_v1_4_0.sv`,
-`libvga_monitor_dpi_v1_4_0.so`, `vga_monitor_v1_4_0.vpi`, …) so multiple versions
-can coexist in one directory. The **module/entity, C-ABI, and `$system-task`
-names inside the files are unchanged**, only the filenames are versioned, so
-upgrading is a one-line edit to your source list and `-l`/`-sv_lib`/`--load`/`-m`
-references (e.g. `-sv_lib vga_monitor_dpi_v1_4_0`), nothing else. (The MinGW
-import libraries are the one exception: they embed the unversioned DLL name, so
-they're omitted from versioned archives; link a versioned DLL by generating an
-import lib with `dlltool`, or load it at runtime.)
+`vga-monitor-<version>-<platform>.tar.gz` to the GitHub Release. It unpacks to a
+`vga-monitor-<version>-<platform>/` folder whose **filenames are the stable,
+unversioned names above** — the version lives in the folder name (and a
+`VERSION` file). Keep the folder, point your tools at it, and multiple versions
+coexist as sibling folders; upgrading is repointing one path, not editing every
+`-l`/`-sv_lib`/`--load`/`-m` reference. Because the filenames don't change, the
+whole bundle ships intact — including the MinGW import libraries (`.dll.a`) and
+the mcode wrapper, both of which embed the unversioned library name.
 
 The prebuilt libraries carry **no simulator headers**, so they load into any
 matching simulator as-is. On Linux/macOS libstdc++/libgcc are folded in, so the
@@ -277,18 +276,19 @@ xelab my_tb -s sim -sv_root <dist> -sv_lib vga_monitor_dpi
 LD_LIBRARY_PATH=<dist> VGA_MONITOR_STREAM=127.0.0.1:5000 xsim sim -R   # <dist> on PATH (Windows)
 ```
 
-For a versioned release, point it at the versioned DLL with
-`VGA_MONITOR_DLL=vga_monitor_dpi_v1_4_0.dll`. (`xsc`/XSim aren't installable in
-CI, so this path is verified manually, not in the test suite.)
+The `vga_monitor_dpi.a` trampoline loads `vga_monitor_dpi.dll` by name; set
+`VGA_MONITOR_DLL=/path/to/vga_monitor_dpi.dll` to load it from elsewhere (e.g. a
+specific version's folder). (`xsc`/XSim aren't installable in CI, so this path is
+verified manually, not in the test suite.)
 
 ## VHDL — VHPIDIRECT
 
 For **GHDL** and **NVC**. Analyze `vga_monitor_pkg.vhdl` + `vga_monitor.vhdl`
 alongside your design and supply `libvga_monitor_vhpi.{so,dylib}` (self-contained,
 libstdc++/libgcc folded in). On Windows use `vga_monitor_vhpi.dll` from the
-**`windows-x86_64-mingw`** bundle, since GHDL and NVC are MinGW-based there; with
-GHDL pick the **LLVM** backend (`mingw-w64-x86_64-ghdl-llvm`), as mcode can't link
-the library.
+**`windows-x86_64-mingw`** bundle, since GHDL and NVC are MinGW-based there. GHDL
+works with either its **LLVM/gcc** backend (links the library) or its **mcode**
+backend (loads it via `vga_monitor_pkg_mcode.vhdl`); see [GHDL](#ghdl) below.
 
 > The VHPIDIRECT wrapper binds via GHDL's `foreign` convention, which **GHDL and
 > NVC** implement. For a VHDL design in **Questa or Vivado XSim**, don't use this
@@ -298,13 +298,24 @@ the library.
 
 ### GHDL
 
-Link the library at elaboration:
+**LLVM / gcc backend** — links the library at elaboration:
 
 ```bash
 ghdl -a --std=08 vga_monitor_pkg.vhdl vga_monitor.vhdl my_design.vhdl my_tb.vhdl
 ghdl -e --std=08 -Wl,-L<dist> -Wl,-lvga_monitor_vhpi my_tb
 LD_LIBRARY_PATH=<dist> VGA_MONITOR_STREAM=127.0.0.1:5000 ./my_tb
 ```
+
+**mcode backend** — no link step, so use `vga_monitor_pkg_mcode.vhdl` (it names
+the library in its `foreign` strings) and put `<dist>` on the loader path so the
+library is found at run time:
+
+```bash
+ghdl -a --std=08 vga_monitor_pkg_mcode.vhdl vga_monitor.vhdl my_design.vhdl my_tb.vhdl
+LD_LIBRARY_PATH=<dist> VGA_MONITOR_STREAM=127.0.0.1:5000 ghdl --elab-run --std=08 my_tb
+```
+
+(On Windows put `<dist>` on `PATH` instead of `LD_LIBRARY_PATH`.)
 
 ### NVC
 
@@ -359,12 +370,13 @@ Use GHDL's **gcc** or **llvm** backend; the distro package is enough:
 sudo apt install ghdl-llvm     # or ghdl-gcc
 ```
 
-> **The mcode backend is not supported.** mcode has no link step, so it can only
-> bind a VHPIDIRECT subprogram by naming the shared library *inside* the VHDL
-> `foreign` attribute, which NVC (sharing the same `vga_monitor_pkg.vhdl`) does
-> not accept. The gcc/llvm backends link the C++ backend at elaboration, which is
-> also GHDL's recommended path for VHPIDIRECT. Override the binary with
-> `GHDL=/path/to/ghdl` if you have several installed.
+> **Building from source uses the gcc/llvm backend**, which links the C++ backend
+> at elaboration. The **mcode** backend has no link step, so it can't link the
+> backend this way — instead it *loads* a prebuilt library via the generated
+> `vga_monitor_pkg_mcode.vhdl` wrapper (see
+> [Getting the monitor](#getting-the-monitor-no-dependencies) and the mcode flow
+> under [GHDL](#ghdl)). Override the binary with `GHDL=/path/to/ghdl` if you have
+> several installed.
 
 To build a specific backend from source instead (e.g. LLVM):
 
