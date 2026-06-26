@@ -25,6 +25,8 @@
 //
 // COLOR_BITS only sizes the r/g/b ports; it carries no timing information.
 
+`timescale 1ns/1ps
+
 module vga_monitor #(
     parameter string NAME       = "VGA Monitor (auto)",
     parameter int    COLOR_BITS = 8
