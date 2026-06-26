@@ -158,8 +158,9 @@ jobs:
           ghdl --version | head -1
           python3 tests/stream_e2e.py --dist dist --sim mcode
 
-  # Windows GHDL mcode (MSYS2's mingw-w64-x86_64-ghdl is the mcode build; the
-  # -ghdl-llvm package is the LLVM one used in the job above).
+  # Windows GHDL mcode. Install the mcode package EXPLICITLY: the bare
+  # mingw-w64-x86_64-ghdl name resolves to the LLVM provider (used in the job
+  # above), so it must be -ghdl-mcode here, not -ghdl.
   artifact-test-windows-mcode:
     name: artifact-test (windows-x86_64-mingw, GHDL mcode)
     runs-on: windows-latest
@@ -178,7 +179,7 @@ jobs:
           install: >-
             make
             mingw-w64-x86_64-python
-            mingw-w64-x86_64-ghdl
+            mingw-w64-x86_64-ghdl-mcode
             mingw-w64-x86_64-ffmpeg
       - name: Test prebuilt artifact (GHDL/VHPI, mcode backend)
         shell: msys2 {0}
