@@ -142,19 +142,26 @@ def loader_env(env: dict, dist: str) -> None:
     env[var] = d + os.pathsep + env.get(var, "")
 
 
-def run_one(sim, dist, variant=""):
+def run_one(sim, dist, variant="", fmt="raw"):
     port = SIMS[sim][1]
     suffix, golden = VARIANTS[variant]
     target = f"stream-{sim}-dist" if dist else f"stream-{sim}{suffix}"
-    grab = Path(f"/tmp/stream_e2e_{sim}{suffix}.ppm") if not IS_WINDOWS \
-        else Path(os.environ.get("TEMP", ".")) / f"stream_e2e_{sim}{suffix}.ppm"
+    tag = f"{sim}{suffix}{'-ppm' if fmt == 'ppm' else ''}"
+    grab = Path(f"/tmp/stream_e2e_{tag}.ppm") if not IS_WINDOWS \
+        else Path(os.environ.get("TEMP", ".")) / f"stream_e2e_{tag}.ppm"
     if grab.exists():
         grab.unlink()
 
-    # 1. ffmpeg: the standard viewer, grabbing one frame off the socket.
+    # 1. ffmpeg: the standard viewer, grabbing one frame off the socket. In ppm
+    #    mode the stream is self-describing (per-frame P6 headers carry the
+    #    geometry), so image2pipe/ppm reads it with NO -video_size; raw rgb24
+    #    must be told the frame size out-of-band.
+    if fmt == "ppm":
+        ff_input = ["-f", "image2pipe", "-vcodec", "ppm"]
+    else:
+        ff_input = ["-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{W}x{H}"]
     ff = subprocess.Popen(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error",
-         "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{W}x{H}",
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", *ff_input,
          "-i", f"tcp://127.0.0.1:{port}?listen=1", "-frames:v", "1", "-y", str(grab)],
     )
     t0 = time.time()
@@ -165,8 +172,12 @@ def run_one(sim, dist, variant=""):
             return False
         time.sleep(0.1)
 
-    # 2. build + run the streaming sim, connecting to ffmpeg.
+    # 2. build + run the streaming sim, connecting to ffmpeg. VGA_MONITOR_FORMAT
+    #    rides the environment through `make` into the sim process (the recipe's
+    #    inline VGA_MONITOR_STREAM doesn't clear it).
     env = dict(os.environ, VGA_MONITOR_FRAMES=FRAMES)
+    if fmt == "ppm":
+        env["VGA_MONITOR_FORMAT"] = "ppm"
     cmd = ["make", target, f"STREAM=127.0.0.1:{port}"]
     if dist:
         loader_env(env, dist)
@@ -189,7 +200,8 @@ def run_one(sim, dist, variant=""):
 
     ok = filecmp.cmp(grab, golden, shallow=False)
     sz = grab.stat().st_size
-    print(f"  {sim}: {'PASS' if ok else 'FAIL'} "
+    label = f"{sim} (ppm)" if fmt == "ppm" else sim
+    print(f"  {label}: {'PASS' if ok else 'FAIL'} "
           f"(ffmpeg grab {sz} B {'==' if ok else '!='} golden {golden.stat().st_size} B)")
     return ok
 
@@ -202,6 +214,9 @@ def main() -> int:
                     help="test the prebuilt artifacts in DIR instead of building from source")
     ap.add_argument("--variant", default="", choices=sorted(VARIANTS),
                     help="pattern variant: '' (8-bit gradient) or 'c4' (4-bit color width)")
+    ap.add_argument("--format", default="raw", choices=("raw", "ppm"),
+                    help="stream wire format: 'raw' (rgb24, ffmpeg -video_size) or "
+                         "'ppm' (self-describing P6, ffmpeg image2pipe)")
     args = ap.parse_args()
 
     if args.variant and args.dist:
@@ -245,14 +260,15 @@ def main() -> int:
             selected.append(s)
 
     mode = f"prebuilt artifacts in {args.dist}" if args.dist else "built from source"
-    print(f"end-to-end raw-rgb24 stream test ({mode})")
+    wire = "ppm (P6, self-describing)" if args.format == "ppm" else "raw rgb24"
+    print(f"end-to-end {wire} stream test ({mode})")
     for s, why in skipped:
         print(f"  {s}: SKIP ({why})")
     if not selected:
         print("RESULT: nothing to test (no matching simulator available)")
         return 2
 
-    results = {s: run_one(s, args.dist, args.variant) for s in selected}
+    results = {s: run_one(s, args.dist, args.variant, args.format) for s in selected}
 
     ok = all(results.values())
     print("RESULT:", "all passed" if ok else "FAILURES: " +
