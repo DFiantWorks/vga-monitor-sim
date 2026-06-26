@@ -12,10 +12,11 @@ VHDL, and Verilog, on Linux, macOS, and Windows; every path reconstructs a
 
 ## Why use it
 
-- **Zero configuration.** The monitor takes **no clock and no parameters**. Wire
-  only the VGA signaling and it recovers everything from the signal itself (sync
-  polarity, pixel clock, active resolution and offset), locking the way a real
-  monitor's PLL does.
+- **Zero configuration.** The monitor takes **no clock and no timing parameters**.
+  Wire only the VGA signaling and it recovers everything from the signal itself
+  (sync polarity, pixel clock, active resolution and offset), locking the way a
+  real monitor's PLL does. The one optional knob, `COLOR_BITS`, only sets the
+  per-channel port width and carries no timing — see [Color width](#color-width).
 - **No GUI in the simulator.** No windowing toolkit is linked into the simulator
   process, so the in-process artifact is tiny and portable (libc/libstdc++ only).
   The viewer is a separate, off-the-shelf program that can run on another machine.
@@ -100,6 +101,27 @@ vga_monitor m (.r(red), .g(green), .b(blue), .hsync(h_sync), .vsync(v_sync)); //
 Multiple instances are supported; instance *i* (by open order) streams to
 `port+i`, so each gets its own viewer.
 
+## Color width
+
+The `r`/`g`/`b` ports default to **8 bits** per channel. If your design drives a
+different per-channel width, set the `COLOR_BITS` parameter/generic so the ports
+match; the monitor rescales each channel to 8-bit before reconstruction (a wider
+channel keeps its top 8 bits, a narrower one is left-justified into 8 bits). It
+affects **port width only — never the recovered timing**, so detection is
+identical regardless of color depth.
+
+```systemverilog
+vga_monitor #(.COLOR_BITS(4)) m (.r, .g, .b, .hsync, .vsync);   // SystemVerilog
+```
+```vhdl
+mon : entity work.vga_monitor                                   -- VHDL
+    generic map (COLOR_BITS => 4)
+    port map (r => red, g => green, b => blue, hsync => h_sync, vsync => v_sync);
+```
+```verilog
+vga_monitor #(.COLOR_BITS(4)) m (.r(red), .g(green), .b(blue), .hsync(h_sync), .vsync(v_sync)); // Verilog
+```
+
 ## Layout
 
 ```
@@ -110,7 +132,7 @@ v/         vga_monitor.v     *_vpi.cpp  glibc_compat.c   VPI module + shim
 examples/  vga_signal_generator / gradient_source           VGA timing + pattern DUT
            tb_stream (gradient) / tb_two_monitors + scroll_source + bars_box_source
            sim_main_stream.cpp / sim_main.cpp / sim_clock_main.h   clock drivers
-golden/    gradient_640x480.ppm                 reference frame for the e2e test
+golden/    gradient_640x480.ppm  *_c4.ppm        reference frames (8-bit + 4-bit COLOR_BITS)
 tests/     stream_e2e.py                        ffmpeg-grab-off-socket vs golden
 Makefile                                        per-simulator stream targets
 ```
@@ -385,7 +407,14 @@ loads it with `vvp -m vga_monitor`. See the `stream-*` targets in the
 ```bash
 make stream-test          # build from source; SIM=dpi|vhpi|nvc|vpi|all (default all)
 make dist-test            # drive the PREBUILT artifacts in $(DIST) instead
+make color-bits-test      # drive the gradient through a 4-bit COLOR_BITS width vs its own golden
 ```
+
+`color-bits-test` covers the [`COLOR_BITS`](#color-width) port-width parameter
+end-to-end on a single simulator (Icarus/VPI): the gradient is driven through a
+4-bit channel and the reconstructed frame is compared to
+`golden/gradient_640x480_c4.ppm`. One simulator suffices because the backend is
+simulator-agnostic (the frame is byte-identical across DPI/VHPI/VPI).
 
 For each simulator this starts `ffmpeg` as the viewer, grabs exactly one frame
 off the socket, and compares it byte-for-byte to the committed golden, exiting

@@ -14,10 +14,16 @@
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.NUMERIC_STD.ALL;
 
 package vga_monitor_pkg is
 
     function sl2i(s : std_logic) return integer;
+
+    -- Scale an arbitrary-width color channel to the backend's 8-bit value,
+    -- mirroring sv/vga_monitor.sv's to8: keep the high 8 bits when wider,
+    -- left-justify into 8 bits when narrower.
+    function to8(c : std_logic_vector) return integer;
 
     -- Open a monitor (no clock, no parameters); returns an integer handle.
     procedure mon_open(handle : out integer);
@@ -39,6 +45,18 @@ package body vga_monitor_pkg is
             return 1;
         else
             return 0;
+        end if;
+    end function;
+
+    function to8(c : std_logic_vector) return integer is
+        constant n : integer := c'length;
+        variable u : unsigned(n - 1 downto 0);
+    begin
+        u := unsigned(c);
+        if n >= 8 then
+            return to_integer(shift_right(u, n - 8));
+        else
+            return to_integer(shift_left(resize(u, 8), 8 - n));
         end if;
     end function;
 

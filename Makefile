@@ -31,7 +31,8 @@ VHDL_DUT := examples/vga_signal_generator.vhdl examples/gradient_source.vhdl
 
 .PHONY: stream-dpi stream-two stream-vhpi stream-nvc stream-vpi stream-test \
         stream-dpi-dist stream-vhpi-dist stream-nvc-dist stream-vpi-dist \
-        dist dist-vpi dist-test clean
+        dist dist-vpi dist-test clean \
+        stream-vpi-c4 color-bits-test
 
 # ---- GHDL backend ----------------------------------------------------------
 # The VHDL flow uses GHDL's gcc or llvm backend: the foreign C backend is linked
@@ -212,6 +213,25 @@ stream-nvc:
 	nvc --std=2008 --work=$(BUILD)/stream-nvc/work -e $(MODULE)
 	VGA_MONITOR_STREAM=$(STREAM) \
 		nvc --std=2008 --work=$(BUILD)/stream-nvc/work -r $(MODULE) --load $(BUILD)/stream-nvc/$(VHPI_LIB)
+
+# ---- COLOR_BITS=4 end-to-end test (one simulator, a 4-bit golden) ----------
+# The same reconstruction path as stream-vpi, but the gradient is driven through
+# a 4-bit color width (tb_gradient_c4). The monitor left-justifies each 4-bit
+# channel back to 8 bits, so the streamed frame is the gradient quantized to 16
+# levels per channel -- compared against its own golden (gradient_640x480_c4).
+# Only the VPI/Icarus path is exercised: the backend is simulator-agnostic, so a
+# single simulator covers the COLOR_BITS parameter. Run via:
+#   make color-bits-test
+stream-vpi-c4:
+	mkdir -p $(BUILD)/stream-vpi-c4
+	$(VPI_BUILD) -o $(BUILD)/stream-vpi-c4/vga_monitor.vpi
+	iverilog -g2012 -o $(BUILD)/stream-vpi-c4/tb_gradient_c4.vvp -s tb_gradient_c4 \
+		examples/tb_gradient_c4.v v/vga_monitor.v $(SV_DUT)
+	VGA_MONITOR_STREAM=$(STREAM) \
+		$(VVP_RUN) -M$(BUILD)/stream-vpi-c4 -m vga_monitor $(BUILD)/stream-vpi-c4/tb_gradient_c4.vvp
+
+color-bits-test:
+	python3 tests/stream_e2e.py --sim vpi --variant c4
 
 clean:
 	rm -rf $(BUILD) obj_dir

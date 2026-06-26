@@ -40,6 +40,14 @@ GOLDEN = ROOT / "golden" / "gradient_640x480.ppm"
 W, H   = 640, 480
 FRAMES = "12"            # > geometry-lock latency (~4 frames); gradient is static
 
+# Optional pattern variants: each maps to a `make` target suffix and its own
+# golden. "" is the default 8-bit gradient; "c4" drives the gradient through a
+# 4-bit color width (COLOR_BITS=4) -- see the Makefile's stream-*-c4 targets.
+VARIANTS = {
+    "":   ("",     GOLDEN),
+    "c4": ("-c4",  ROOT / "golden" / "gradient_640x480_c4.ppm"),
+}
+
 # sim -> (executables that must be on PATH, TCP port). Distinct ports so a
 # leftover socket from one sim can't be mistaken for the next.
 SIMS = {
@@ -115,11 +123,12 @@ def loader_env(env: dict, dist: str) -> None:
     env[var] = d + os.pathsep + env.get(var, "")
 
 
-def run_one(sim, dist):
+def run_one(sim, dist, variant=""):
     port = SIMS[sim][1]
-    target = f"stream-{sim}-dist" if dist else f"stream-{sim}"
-    grab = Path(f"/tmp/stream_e2e_{sim}.ppm") if not IS_WINDOWS \
-        else Path(os.environ.get("TEMP", ".")) / f"stream_e2e_{sim}.ppm"
+    suffix, golden = VARIANTS[variant]
+    target = f"stream-{sim}-dist" if dist else f"stream-{sim}{suffix}"
+    grab = Path(f"/tmp/stream_e2e_{sim}{suffix}.ppm") if not IS_WINDOWS \
+        else Path(os.environ.get("TEMP", ".")) / f"stream_e2e_{sim}{suffix}.ppm"
     if grab.exists():
         grab.unlink()
 
@@ -159,10 +168,10 @@ def run_one(sim, dist):
         print((sim_proc.stdout + sim_proc.stderr)[-6000:])
         return False
 
-    ok = filecmp.cmp(grab, GOLDEN, shallow=False)
+    ok = filecmp.cmp(grab, golden, shallow=False)
     sz = grab.stat().st_size
     print(f"  {sim}: {'PASS' if ok else 'FAIL'} "
-          f"(ffmpeg grab {sz} B {'==' if ok else '!='} golden {GOLDEN.stat().st_size} B)")
+          f"(ffmpeg grab {sz} B {'==' if ok else '!='} golden {golden.stat().st_size} B)")
     return ok
 
 
@@ -172,7 +181,13 @@ def main() -> int:
                     help="comma-separated subset of: " + ", ".join(SIMS) + " (default all)")
     ap.add_argument("--dist", default=None, metavar="DIR",
                     help="test the prebuilt artifacts in DIR instead of building from source")
+    ap.add_argument("--variant", default="", choices=sorted(VARIANTS),
+                    help="pattern variant: '' (8-bit gradient) or 'c4' (4-bit color width)")
     args = ap.parse_args()
+
+    if args.variant and args.dist:
+        print("error: --variant cannot be combined with --dist")
+        return 2
 
     if not which("ffmpeg"):
         print("error: 'ffmpeg' not found (needed for the end-to-end test)")
@@ -207,7 +222,7 @@ def main() -> int:
         print("RESULT: nothing to test (no matching simulator available)")
         return 2
 
-    results = {s: run_one(s, args.dist) for s in selected}
+    results = {s: run_one(s, args.dist, args.variant) for s in selected}
 
     ok = all(results.values())
     print("RESULT:", "all passed" if ok else "FAILURES: " +
