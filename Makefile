@@ -9,12 +9,18 @@
 # Start a viewer first (it listens), then run a stream target (the sim connects
 # once geometry locks):
 #   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 \
-#          -i 'tcp://0.0.0.0:5000?listen=1'
+#          -i 'tcp://127.0.0.1:5000?listen=1'
 #   make stream-dpi       # or stream-vhpi / stream-vpi   (STREAM=host:port)
 #   make stream-two       # two moving patterns -> two viewers (ports base, base+1)
 #
+# For a self-describing stream set VGA_MONITOR_FORMAT=ppm: each frame carries a
+# P6 header with its geometry, so the viewer needs no -video_size:
+#   VGA_MONITOR_FORMAT=ppm make stream-dpi
+#   ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000?listen=1'
+#
 # Full end-to-end test (ffmpeg grabs a frame off the socket, compares to golden):
 #   make stream-test      # build from source;  SIM=dpi|vhpi|nvc|vpi|all
+#   make ppm-test         # same, but the self-describing PPM (P6) wire format
 #   make dist && make dist-vpi && make dist-test   # test the PREBUILT artifacts
 #   make clean
 
@@ -33,7 +39,7 @@ VHDL_DUT := examples/vga_signal_generator.vhdl examples/gradient_source.vhdl
         stream-dpi-dist stream-vhpi-dist stream-nvc-dist stream-vpi-dist \
         stream-mcode-dist \
         dist dist-vpi dist-test clean \
-        stream-vpi-c4 color-bits-test
+        stream-vpi-c4 color-bits-test ppm-test
 
 # ---- GHDL backend ----------------------------------------------------------
 # The from-source VHDL flow uses GHDL's gcc or llvm backend: the foreign C
@@ -55,8 +61,8 @@ stream-dpi:
 
 # ---- Two monitors, two MOVING patterns -> two streams (ports base, base+1) --
 # A richer thing to watch. Start two viewers first (default ports 5000 + 5001):
-#   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://0.0.0.0:5000?listen=1'
-#   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://0.0.0.0:5001?listen=1'
+#   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000?listen=1'
+#   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5001?listen=1'
 stream-two:
 	mkdir -p $(BUILD)/stream-two
 	verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
@@ -253,6 +259,14 @@ stream-vpi-c4:
 
 color-bits-test:
 	python3 tests/stream_e2e.py --sim vpi --variant c4
+
+# ---- Self-describing PPM (P6) stream end-to-end test -----------------------
+# Same reconstruction path as stream-test, but VGA_MONITOR_FORMAT=ppm makes the
+# backend prepend a per-frame "P6\n<W> <H>\n255\n" header. ffmpeg reads it via
+# image2pipe/ppm with NO -video_size -- the geometry rides in-band. Run via:
+#   make ppm-test                 # SIM=dpi|vhpi|nvc|vpi|all
+ppm-test:
+	python3 tests/stream_e2e.py --sim $(SIM) --format ppm
 
 clean:
 	rm -rf $(BUILD) obj_dir

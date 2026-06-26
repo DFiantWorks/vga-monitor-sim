@@ -23,9 +23,16 @@
 //                             each finished frame as raw rgb24 (W*H*3 bytes). A
 //                             standard viewer reads it directly, e.g.:
 //                               ffplay -f rawvideo -pixel_format rgb24 \
-//                                      -video_size 640x480 -i 'tcp://0.0.0.0:5000?listen=1'
+//                                      -video_size 640x480 -i 'tcp://127.0.0.1:5000?listen=1'
 //                             With multiple monitors, instance i (by open order)
 //                             connects to port+i, so each gets its own viewer.
+//   VGA_MONITOR_FORMAT=raw|ppm  stream wire format (default raw). In ppm mode
+//                             each frame is a self-describing P6 PPM (a ~15-byte
+//                             ASCII "P6\n<W> <H>\n255\n" header carrying the
+//                             geometry, then the same W*H*3 rgb24 bytes), so a
+//                             viewer needs no out-of-band -video_size:
+//                               ffplay -f image2pipe -vcodec ppm -i tcp://127.0.0.1:5000?listen=1
+//                             The format choice is global across instances.
 
 #include <cerrno>
 #include <climits>
@@ -171,6 +178,7 @@ long g_frame_limit = -1;          // -1 => unlimited
 bool g_inited = false;
 int  g_open_count = 0;            // monitors opened so far (for per-instance port)
 std::string g_stream_target;      // "host:port" or empty (no streaming)
+bool g_stream_ppm = false;        // VGA_MONITOR_FORMAT=ppm -> per-frame P6 headers
 
 void lazy_init_globals() {
     if (g_inited) return;
@@ -181,6 +189,9 @@ void lazy_init_globals() {
     }
     if (const char* s = std::getenv("VGA_MONITOR_STREAM")) {
         if (s[0]) g_stream_target = s;
+    }
+    if (const char* f = std::getenv("VGA_MONITOR_FORMAT")) {
+        g_stream_ppm = (std::string(f) == "ppm");
     }
 }
 
@@ -219,16 +230,14 @@ void stream_connect(Monitor* m) {
     }
     m->stream_fd = fd;
     std::fprintf(stderr,
-        "[vga_monitor] '%s' streaming raw rgb24 %dx%d to %s:%s\n",
-        m->name.c_str(), m->h_active, m->v_active, host.c_str(), port.c_str());
+        "[vga_monitor] '%s' streaming %s %dx%d to %s:%s\n",
+        m->name.c_str(), g_stream_ppm ? "ppm (P6)" : "raw rgb24",
+        m->h_active, m->v_active, host.c_str(), port.c_str());
 }
 
-// Write one finished frame as raw rgb24 (W*H*3 bytes, no header). The Pixel
-// vector is already tightly packed r,g,b -- exactly the rawvideo layout.
-void stream_send_frame(Monitor* m) {
-    if (m->stream_fd == kBadSock) return;
-    const char* p = reinterpret_cast<const char*>(m->framebuffer.data());
-    size_t n = m->framebuffer.size() * sizeof(Pixel);
+// Send exactly n bytes, retrying short writes. On error closes the socket and
+// returns false (the caller then stops streaming this frame).
+bool stream_write_all(Monitor* m, const char* p, size_t n) {
     while (n) {
         auto k = sock_send(m->stream_fd, p, n);
         if (k <= 0) {
@@ -238,10 +247,29 @@ void stream_send_frame(Monitor* m) {
             std::fprintf(stderr, "[vga_monitor] '%s' stream: viewer gone, stopping\n",
                          m->name.c_str());
             sock_close(m->stream_fd); m->stream_fd = kBadSock;
-            return;
+            return false;
         }
         p += k; n -= static_cast<size_t>(k);
     }
+    return true;
+}
+
+// Write one finished frame. The Pixel vector is already tightly packed r,g,b --
+// exactly the rawvideo layout -- so raw mode sends it verbatim (W*H*3 bytes, no
+// header). In PPM mode (VGA_MONITOR_FORMAT=ppm) each frame is prefixed with its
+// own P6 header ("P6\n<W> <H>\n255\n"), making the stream self-describing: the
+// geometry rides in-band, so image2pipe/ppm viewers need no -video_size.
+void stream_send_frame(Monitor* m) {
+    if (m->stream_fd == kBadSock) return;
+    if (g_stream_ppm) {
+        char hdr[64];
+        int len = std::snprintf(hdr, sizeof(hdr), "P6\n%d %d\n255\n",
+                                m->h_active, m->v_active);
+        if (!stream_write_all(m, hdr, static_cast<size_t>(len))) return;
+    }
+    const char* p = reinterpret_cast<const char*>(m->framebuffer.data());
+    size_t n = m->framebuffer.size() * sizeof(Pixel);
+    stream_write_all(m, p, n);
 }
 
 // Called once per complete frame (on the leading edge of the vsync pulse, after
