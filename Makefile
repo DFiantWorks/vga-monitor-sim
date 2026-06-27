@@ -56,7 +56,8 @@ stream-dpi:
 	verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
 		--top-module tb_stream --Mdir $(BUILD)/stream-dpi -o tb_stream \
 		examples/tb_stream.sv examples/vga_signal_generator.sv examples/gradient_source.sv \
-		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main_stream.cpp)
+		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main_stream.cpp) \
+		$(SOCK_LDFLAGS)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-dpi/tb_stream
 
 # ---- Two monitors, two MOVING patterns -> two streams (ports base, base+1) --
@@ -69,7 +70,8 @@ stream-two:
 		--top-module tb_two_monitors --Mdir $(BUILD)/stream-two -o tb_two_monitors \
 		examples/tb_two_monitors.sv examples/vga_signal_generator.sv \
 		examples/scroll_source.sv examples/bars_box_source.sv \
-		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main.cpp)
+		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main.cpp) \
+		$(SOCK_LDFLAGS)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-two/tb_two_monitors
 
 # ---- VHPIDIRECT / GHDL -----------------------------------------------------
@@ -127,6 +129,16 @@ dist-test:
 # step, so this drop-in variant names $(VHPI_LIB) in each `foreign` string.
 CXX ?= c++
 UNAME_S := $(shell uname -s)
+# Winsock must be linked explicitly under MinGW (the #pragma comment(lib) in the
+# backend source is MSVC-only); it is in libc on Linux/macOS. Used by the
+# from-source Verilator DPI targets, which compile the backend into the exe. The
+# whole -LDFLAGS clause is empty off Windows -- an empty `-LDFLAGS ""` is rejected
+# by Verilator ("Invalid option: -LDFLAGS").
+ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
+  SOCK_LDFLAGS := -LDFLAGS -lws2_32
+else
+  SOCK_LDFLAGS :=
+endif
 ifeq ($(UNAME_S),Darwin)
   LIBPRE     := lib
   LIBEXT     := dylib
