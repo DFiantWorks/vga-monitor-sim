@@ -57,7 +57,7 @@ stream-dpi:
 		--top-module tb_stream --Mdir $(BUILD)/stream-dpi -o tb_stream \
 		examples/tb_stream.sv examples/vga_signal_generator.sv examples/gradient_source.sv \
 		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main_stream.cpp) \
-		$(SOCK_LDFLAGS)
+		$(VERILATED_OPT) $(SOCK_LDFLAGS)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-dpi/tb_stream
 
 # ---- Two monitors, two MOVING patterns -> two streams (ports base, base+1) --
@@ -71,7 +71,7 @@ stream-two:
 		examples/tb_two_monitors.sv examples/vga_signal_generator.sv \
 		examples/scroll_source.sv examples/bars_box_source.sv \
 		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main.cpp) \
-		$(SOCK_LDFLAGS)
+		$(VERILATED_OPT) $(SOCK_LDFLAGS)
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-two/tb_two_monitors
 
 # ---- VHPIDIRECT / GHDL -----------------------------------------------------
@@ -134,10 +134,21 @@ UNAME_S := $(shell uname -s)
 # from-source Verilator DPI targets, which compile the backend into the exe. The
 # whole -LDFLAGS clause is empty off Windows -- an empty `-LDFLAGS ""` is rejected
 # by Verilator ("Invalid option: -LDFLAGS").
+# Also fold in two preventive MinGW guards for the Verilator DPI exe (cheap,
+# proven in interactive-sim): -static-libstdc++/-static-libgcc so it needs no
+# libstdc++ DLL at run time, and (via VERILATED_OPT below) build the runtime at
+# -O2. The rolling MSYS2 gcc 16 can make a libstdc++ symbol inline-only while the
+# verilated runtime at Verilator's default -Os emits an out-of-line call to it,
+# failing the link; -O2 inlines it. This build is WITHOUT --timing, so it is not
+# currently affected, but the guards cost nothing.
 ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
-  SOCK_LDFLAGS := -LDFLAGS -lws2_32
+  STATIC_CXX    := -static-libstdc++ -static-libgcc
+  SOCK_LDFLAGS  := -LDFLAGS "-lws2_32 $(STATIC_CXX)"
+  VERILATED_OPT := -CFLAGS -O2
 else
-  SOCK_LDFLAGS :=
+  STATIC_CXX    :=
+  SOCK_LDFLAGS  :=
+  VERILATED_OPT :=
 endif
 ifeq ($(UNAME_S),Darwin)
   LIBPRE     := lib
@@ -203,7 +214,7 @@ stream-dpi-dist:
 		--top-module tb_stream --Mdir $(BUILD)/stream-dpi-dist -o tb_stream \
 		examples/tb_stream.sv examples/vga_signal_generator.sv examples/gradient_source.sv \
 		sv/vga_monitor.sv $(abspath examples/sim_main_stream.cpp) \
-		-LDFLAGS "-L$(DIST_ABS) -lvga_monitor_dpi $(RPATH)"
+		$(VERILATED_OPT) -LDFLAGS "-L$(DIST_ABS) -lvga_monitor_dpi $(RPATH) $(STATIC_CXX)"
 	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-dpi-dist/tb_stream
 
 stream-vhpi-dist:
