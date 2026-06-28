@@ -68,6 +68,7 @@
   static int  sock_close(sock_t s) { return ::closesocket(s); }
   static int  sock_send(sock_t s, const char* b, size_t n) { return ::send(s, b, (int)n, 0); }
   static void sock_set_nonblock(sock_t s) { u_long m = 1; ::ioctlsocket(s, FIONBIO, &m); }
+  static void sock_set_block(sock_t s)    { u_long m = 0; ::ioctlsocket(s, FIONBIO, &m); }
   static void sock_set_send_timeout(sock_t s, int ms) {
       DWORD t = static_cast<DWORD>(ms);
       ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&t), sizeof(t));
@@ -100,6 +101,7 @@
   #endif
   }
   static void sock_set_nonblock(sock_t s) { ::fcntl(s, F_SETFL, ::fcntl(s, F_GETFL, 0) | O_NONBLOCK); }
+  static void sock_set_block(sock_t s)    { int f = ::fcntl(s, F_GETFL, 0); if (f != -1) ::fcntl(s, F_SETFL, f & ~O_NONBLOCK); }
   static void sock_set_send_timeout(sock_t s, int ms) {
       struct timeval tv{ ms / 1000, (ms % 1000) * 1000 };
       ::setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -301,9 +303,13 @@ void stream_accept(Monitor* m) {
             std::fprintf(stderr, "[vga_monitor] '%s' stream: accept failed\n", m->name.c_str());
         return;
     }
-    // Bound write time so a paused/slow viewer drops frames rather than stalling
-    // the simulation; on timeout the half-written frame is abandoned and a PPM
-    // viewer resyncs on the next frame's P6 magic.
+    // Force blocking: on BSD/macOS accept() inherits the listener's non-blocking
+    // flag, which would make a full-frame send return EWOULDBLOCK partway and tear
+    // the stream. We want blocking writes, bounded instead by a send timeout so a
+    // paused/slow viewer drops frames rather than stalling the simulation; on a
+    // timeout the half-written frame is abandoned and a PPM viewer resyncs on the
+    // next frame's P6 magic.
+    sock_set_block(fd);
     sock_set_send_timeout(fd, 1000);
     m->stream_fd = fd;
     std::fprintf(stderr, "[vga_monitor] '%s' viewer connected (%dx%d)\n",
