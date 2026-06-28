@@ -209,6 +209,30 @@ For a live viewer that may join or rejoin mid-stream, the self-describing **PPM*
 format below is recommended — it lets the viewer resync on each frame's header.
 Alternatives that also read the stream: `mpv`, VLC, GStreamer.
 
+### Auto-reconnecting the viewer
+
+`ffplay` is single-shot: it connects once, plays the stream, and exits when the
+connection drops — it has no built-in reconnect for a TCP input. (ffmpeg's
+`-reconnect*` options apply only to the HTTP/HTTPS protocols, not to `tcp`, and
+`ffplay -loop` only re-plays *local files*.) Because the **simulator is the
+persistent server**, you can simply loop the viewer so each session reconnects to
+the still-running simulation automatically (no need to relaunch by hand, and
+nothing to change on the simulator side):
+
+```bash
+# reconnects within milliseconds whenever ffplay is closed or the link drops
+while true; do ffplay -f image2pipe -vcodec ppm -i tcp://127.0.0.1:5000; done
+```
+
+```powershell
+# PowerShell
+while ($true) { ffplay -f image2pipe -vcodec ppm -i tcp://127.0.0.1:5000 }
+```
+
+(Flipping the roles so the simulator is the *client* would not avoid this —
+`ffplay` is single-shot whether it listens or connects, so it would still need
+relaunching; making the simulator the server just lets a one-line loop handle it.)
+
 ## Stream format: raw rgb24 or self-describing PPM
 
 The stream defaults to **raw rgb24** — each frame is exactly `width × height × 3`
