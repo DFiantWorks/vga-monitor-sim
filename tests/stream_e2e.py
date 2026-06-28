@@ -195,7 +195,7 @@ def kill_port(port):
         subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
 
 
-def run_one(sim, dist, variant="", fmt="raw"):
+def run_one(sim, dist, variant="", fmt="ppm"):
     port = SIMS[sim][1]
     suffix, golden = VARIANTS[variant]
     target = f"stream-{sim}-dist" if dist else f"stream-{sim}{suffix}"
@@ -281,9 +281,9 @@ def main() -> int:
                     help="test the prebuilt artifacts in DIR instead of building from source")
     ap.add_argument("--variant", default="", choices=sorted(VARIANTS),
                     help="pattern variant: '' (8-bit gradient) or 'c4' (4-bit color width)")
-    ap.add_argument("--format", default="raw", choices=("raw", "ppm"),
-                    help="stream wire format: 'raw' (rgb24, ffmpeg -video_size) or "
-                         "'ppm' (self-describing P6, ffmpeg image2pipe)")
+    ap.add_argument("--format", default="ppm", choices=("raw", "ppm"),
+                    help="stream wire format: 'ppm' (self-describing P6, ffmpeg "
+                         "image2pipe; default) or 'raw' (rgb24, ffmpeg -video_size)")
     args = ap.parse_args()
 
     if args.variant and args.dist:

@@ -2,9 +2,9 @@
 
 Watch your HDL design's VGA output in software: no FPGA, no physical monitor.
 Wire your design's VGA signals (`r, g, b, hsync, vsync`) into a drop-in
-`vga_monitor` module; it reconstructs the image and **streams it as raw rgb24
-over TCP to any standard viewer** (e.g. `ffplay`), like plugging a cable into a
-real monitor, except the cable is a socket.
+`vga_monitor` module; it reconstructs the image and **streams it over TCP to any
+standard viewer** (e.g. `ffplay`) as self-describing PPM, like plugging a cable
+into a real monitor, except the cable is a socket.
 
 One C++ backend drives **every major HDL simulator**, across SystemVerilog,
 VHDL, and Verilog, on Linux, macOS, and Windows; every path reconstructs a
@@ -186,8 +186,8 @@ side**.
 
 ## A viewer, per OS
 
-Any program that reads raw rgb24 from a TCP socket works; `ffplay` (shipped with
-**ffmpeg**) is the simplest and is used throughout below.
+Any program that reads PPM (or raw rgb24) from a TCP socket works; `ffplay`
+(shipped with **ffmpeg**) is the simplest and is used throughout below.
 
 | OS | Install ffmpeg |
 | --- | --- |
@@ -198,16 +198,19 @@ Any program that reads raw rgb24 from a TCP socket works; `ffplay` (shipped with
 The **simulator is the server**: it binds + listens, and the viewer connects to
 it — like plugging a cable into a monitor. Launch order does not matter, and you
 can connect, disconnect, and reconnect the viewer on the fly; the simulation runs
-unaffected while nothing is attached. The same command works on every OS (on
-Windows use `ffplay.exe`):
+unaffected while nothing is attached. The stream is **self-describing PPM** by
+default, so the viewer needs no `-video_size` and can resync when it joins or
+rejoins mid-stream. The same command works on every OS (on Windows use
+`ffplay.exe`):
 
 ```bash
-ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000'
+ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'
 ```
 
-For a live viewer that may join or rejoin mid-stream, the self-describing **PPM**
-format below is recommended — it lets the viewer resync on each frame's header.
-Alternatives that also read the stream: `mpv`, VLC, GStreamer.
+Prefer the leaner raw rgb24 wire format? Set `VGA_MONITOR_FORMAT=raw` on the
+simulator and view with `-f rawvideo -pixel_format rgb24 -video_size 640x480`
+(see [Stream format](#stream-format-ppm-or-raw-rgb24) below). Alternatives that
+also read the stream: `mpv`, VLC, GStreamer.
 
 ### Auto-reconnecting the viewer
 
@@ -233,26 +236,17 @@ while ($true) { ffplay -f image2pipe -vcodec ppm -i tcp://127.0.0.1:5000 }
 `ffplay` is single-shot whether it listens or connects, so it would still need
 relaunching; making the simulator the server just lets a one-line loop handle it.)
 
-## Stream format: raw rgb24 or self-describing PPM
+## Stream format: PPM or raw rgb24
 
-The stream defaults to **raw rgb24** — each frame is exactly `width × height × 3`
-bytes, back to back, with no header. It's the leanest wire format, but it isn't
-self-describing: the viewer must be told the resolution out-of-band
-(`-video_size 640x480` above), and if a design runs at another resolution you
-must update that flag to match the locked geometry the monitor logs.
-
-Set **`VGA_MONITOR_FORMAT=ppm`** to stream **concatenated P6 PPM frames** instead.
-Each frame is prefixed with a ~15-byte ASCII header carrying its own dimensions:
+The stream defaults to **self-describing P6 PPM**. Each frame is a concatenated
+PPM: a ~15-byte ASCII header carrying its own dimensions, then the pixels:
 
 ```
-P6\n<width> <height>\n255\n<width × height × 3 raw rgb24 bytes>
+P6\n<width> <height>\n255\n<width × height × 3 rgb24 bytes>
 ```
 
-The pixel bytes are identical to raw mode — it's "rgb24 plus a tiny width/height
-header" — so the stream stays standard-tool-compatible while becoming
-**self-describing**. ffmpeg/ffplay read it through the built-in `ppm` decoder and
-`image2pipe` demuxer, with **no `-video_size`** (the geometry comes from each
-frame header):
+ffmpeg/ffplay read it through the built-in `ppm` decoder and `image2pipe`
+demuxer, with **no `-video_size`** (the geometry comes from each frame header):
 
 ```bash
 ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'
@@ -261,19 +255,25 @@ ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'
 Per-frame headers (not header-once) make the stream robust to a **late-joining or
 reconnecting** reader: ffplay resyncs on the next `P6` magic, so a viewer can
 attach mid-stream (or reattach after dropping) and lock straight onto the next
-frame — which is why PPM is the recommended format for a live viewer. The format
-choice is **global** across instances; the per-instance `port+i` mapping is
-unchanged. The `make stream-*` run targets default to PPM (`FORMAT=ppm`); pass
-`FORMAT=raw` for raw rgb24.
+frame — which is why PPM is the default for this order-insensitive, server-side
+stream.
 
-| | `raw` (default) | `ppm` |
+Set **`VGA_MONITOR_FORMAT=raw`** for **bare rgb24** instead — each frame is
+exactly `width × height × 3` bytes, back to back, with no header. The pixel bytes
+are identical to PPM (it's "rgb24 plus a tiny width/height header"), so raw is
+just the leaner wire, but it isn't self-describing: the viewer must be told the
+resolution out-of-band (`-video_size 640x480`, matching the locked geometry the
+monitor logs) and cannot resync mid-stream.
+
+The format choice is **global** across instances; the per-instance `port+i`
+mapping is unchanged. For the `make` run targets, set it with `FORMAT=raw`.
+
+| | `ppm` (default) | `raw` |
 | --- | --- | --- |
-| Per frame | `W×H×3` rgb24 bytes, no header | `P6\nW H\n255\n` + the same `W×H×3` bytes |
-| Self-describing | no — viewer needs `-video_size` | yes — geometry rides in-band |
-| ffplay input | `-f rawvideo -pixel_format rgb24 -video_size WxH` | `-f image2pipe -vcodec ppm` |
-
-Raw mode is the default and unchanged, so existing viewers keep working; PPM is
-strictly opt-in.
+| Per frame | `P6\nW H\n255\n` + `W×H×3` bytes | `W×H×3` rgb24 bytes, no header |
+| Self-describing | yes — geometry rides in-band | no — viewer needs `-video_size` |
+| Resync mid-stream | yes — on each `P6` magic | no |
+| ffplay input | `-f image2pipe -vcodec ppm` | `-f rawvideo -pixel_format rgb24 -video_size WxH` |
 
 ---
 
@@ -291,17 +291,17 @@ The flow is the same for every simulator:
 
 Launch order is irrelevant and the viewer can come and go at will: the simulator
 is the server, so it just keeps simulating and serves whatever viewer is attached.
-The frame size is fixed once geometry locks, so a standard raw-rgb24 viewer needs
-the resolution up front (`-video_size`); the monitor logs the locked geometry
-(`locked 640x480 ...`) — read that line, then point the viewer at it. To skip that
-step (and to let a viewer join or rejoin mid-stream), switch to the self-describing
-PPM format ([Stream format](#stream-format-raw-rgb24-or-self-describing-ppm)),
-which carries the geometry in-band. Three environment variables control a run:
+The stream is **self-describing PPM** by default, so the viewer needs no
+`-video_size` and resyncs when it joins mid-stream. (With `VGA_MONITOR_FORMAT=raw`
+the wire is bare rgb24 and a viewer needs the resolution up front; the monitor
+logs the locked geometry — `locked 640x480 ...` — so read that line and pass it as
+`-video_size`. See [Stream format](#stream-format-ppm-or-raw-rgb24).) Three
+environment variables control a run:
 
 | Variable | Effect |
 | --- | --- |
 | `VGA_MONITOR_STREAM=host:port` | bind + listen here; serve finished frames over TCP (instance *i* → `port+i`). `127.0.0.1` for local viewers, `0.0.0.0` for remote |
-| `VGA_MONITOR_FORMAT=raw\|ppm` | wire format: `raw` rgb24 (default) or self-describing `ppm` — see [Stream format](#stream-format-raw-rgb24-or-self-describing-ppm) |
+| `VGA_MONITOR_FORMAT=ppm\|raw` | wire format: self-describing `ppm` (default) or bare `raw` rgb24 — see [Stream format](#stream-format-ppm-or-raw-rgb24) |
 | `VGA_MONITOR_FRAMES=<N>` | exit after N complete frames (unset = serve forever) |
 
 The examples use `127.0.0.1` (loopback) for simulator and viewer on the same host.
@@ -492,7 +492,7 @@ ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'
 Override the address with `STREAM=host:port` (default `127.0.0.1:5000`). To use
 raw rgb24 instead of PPM, pass `FORMAT=raw` on the make invocation and view with
 `ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000'`
-([Stream format](#stream-format-raw-rgb24-or-self-describing-ppm)).
+([Stream format](#stream-format-ppm-or-raw-rgb24)).
 
 The VHDL flow links `backend/vga_monitor.cpp` + `vhdl/vga_monitor_vhpi.cpp` and
 analyzes `vhdl/vga_monitor_pkg.vhdl` + `vhdl/vga_monitor.vhdl`; the Icarus flow
@@ -503,17 +503,17 @@ loads it with `vvp -m vga_monitor`. See the `stream-*` targets in the
 ## End-to-end test
 
 ```bash
-make stream-test          # build from source; SIM=dpi|vhpi|nvc|vpi|all (default all)
+make stream-test          # build from source, PPM default; SIM=dpi|vhpi|nvc|vpi|all (default all)
 make dist-test            # drive the PREBUILT artifacts in $(DIST) instead
 make color-bits-test      # drive the gradient through a 4-bit COLOR_BITS width vs its own golden
-make ppm-test             # same grab, but the self-describing PPM wire format (VGA_MONITOR_FORMAT=ppm)
+make raw-test             # same grab, but the bare raw rgb24 wire format (VGA_MONITOR_FORMAT=raw)
 ```
 
-`ppm-test` exercises the [PPM stream format](#stream-format-raw-rgb24-or-self-describing-ppm):
-the sim streams `VGA_MONITOR_FORMAT=ppm`, `ffmpeg` reads it via `image2pipe`/`ppm`
-with **no `-video_size`** (the geometry rides in each frame header), and the
-grabbed P6 frame is compared byte-for-byte to the golden — which is itself a P6
-PPM, so the comparison is direct.
+Both `stream-test` (PPM, the default) and `raw-test` (bare rgb24) drive the same
+reconstruction path; `ffmpeg` grabs one frame off the socket and it's compared
+byte-for-byte to the golden — which is itself a P6 PPM, so the comparison is
+direct regardless of wire format (in raw mode `ffmpeg` is told the geometry via
+`-video_size`; in PPM it rides in each frame header).
 
 `color-bits-test` covers the [`COLOR_BITS`](#color-width) port-width parameter
 end-to-end on a single simulator (Icarus/VPI): the gradient is driven through a

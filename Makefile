@@ -1,5 +1,5 @@
 # Self-contained, auto-detecting VGA monitor -- one monitor, three simulators,
-# streamed to a standard viewer as raw rgb24 over TCP.
+# streamed to a standard viewer as self-describing PPM (P6) over TCP.
 #
 # One monitor variant: no clock, no parameters. The same C++ backend
 # (backend/vga_monitor.cpp) is reached by three thin shims -- DPI (sv/),
@@ -8,20 +8,21 @@
 #
 # The monitor is the SERVER: a stream target listens, and a viewer connects to
 # it. Launch order does not matter and a viewer can connect/disconnect/reconnect
-# on the fly; the simulation runs unaffected while none is attached. The live
-# targets stream self-describing PPM (VGA_MONITOR_FORMAT=ppm) so ffplay resyncs
-# on the P6 magic when it joins mid-stream and needs no -video_size:
+# on the fly; the simulation runs unaffected while none is attached. The stream
+# defaults to self-describing PPM (P6), so ffplay resyncs on the P6 magic when it
+# joins mid-stream and needs no -video_size:
 #   make stream-dpi       # or stream-vhpi / stream-vpi   (STREAM=host:port)
 #   make stream-two       # two moving patterns -> two viewers (ports base, base+1)
 #   ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'    # connect any time
 #
-# Raw rgb24 is the other wire format (VGA_MONITOR_FORMAT=raw); the viewer must be
+# Raw rgb24 is the other wire format (FORMAT=raw); leaner, but the viewer must be
 # told the geometry out of band and cannot resync mid-stream:
+#   make stream-dpi FORMAT=raw
 #   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000'
 #
 # Full end-to-end test (ffmpeg grabs a frame off the socket, compares to golden):
-#   make stream-test      # build from source;  SIM=dpi|vhpi|nvc|vpi|all
-#   make ppm-test         # same, but the self-describing PPM (P6) wire format
+#   make stream-test      # build from source, PPM;  SIM=dpi|vhpi|nvc|vpi|all
+#   make raw-test         # same, but the bare raw rgb24 wire format
 #   make dist && make dist-vpi && make dist-test   # test the PREBUILT artifacts
 #   make clean
 
@@ -34,7 +35,7 @@ DIST    ?= $(BUILD)/dist
 # Wire format for the run targets: ppm (self-describing P6, the recommended live
 # default -- a viewer resyncs on the P6 magic when it joins mid-stream) or raw
 # (rgb24, viewer needs -video_size). The e2e harness overrides this per test.
-FORMAT  ?= ppm
+FORMAT  ?= ppm           # ppm (default, self-describing P6) or raw (bare rgb24)
 
 # DUT shared by every fixture. The Verilog DUT (.sv) also serves the VPI flow.
 SV_DUT   := examples/vga_signal_generator.sv examples/gradient_source.sv
@@ -44,7 +45,7 @@ VHDL_DUT := examples/vga_signal_generator.vhdl examples/gradient_source.vhdl
         stream-dpi-dist stream-vhpi-dist stream-nvc-dist stream-vpi-dist \
         stream-mcode-dist \
         dist dist-vpi dist-test clean \
-        stream-vpi-c4 color-bits-test ppm-test
+        stream-vpi-c4 color-bits-test raw-test
 
 # ---- GHDL backend ----------------------------------------------------------
 # The from-source VHDL flow uses GHDL's gcc or llvm backend: the foreign C
@@ -310,13 +311,13 @@ stream-vpi-c4:
 color-bits-test:
 	python3 tests/stream_e2e.py --sim vpi --variant c4
 
-# ---- Self-describing PPM (P6) stream end-to-end test -----------------------
-# Same reconstruction path as stream-test, but VGA_MONITOR_FORMAT=ppm makes the
-# backend prepend a per-frame "P6\n<W> <H>\n255\n" header. ffmpeg reads it via
-# image2pipe/ppm with NO -video_size -- the geometry rides in-band. Run via:
-#   make ppm-test                 # SIM=dpi|vhpi|nvc|vpi|all
-ppm-test:
-	python3 tests/stream_e2e.py --sim $(SIM) --format ppm
+# ---- Bare raw rgb24 stream end-to-end test ---------------------------------
+# Same reconstruction path as stream-test (which defaults to PPM), but
+# VGA_MONITOR_FORMAT=raw streams bare rgb24 with no per-frame header, so ffmpeg
+# must be told the geometry out of band (-video_size). Run via:
+#   make raw-test                 # SIM=dpi|vhpi|nvc|vpi|all
+raw-test:
+	python3 tests/stream_e2e.py --sim $(SIM) --format raw
 
 clean:
 	rm -rf $(BUILD) obj_dir

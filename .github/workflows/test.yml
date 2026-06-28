@@ -45,7 +45,9 @@ jobs:
         run: sudo apt-get install -y ghdl-gcc
       - name: Tool versions
         run: verilator --version; iverilog -V | head -1; ghdl --version | head -1; nvc --version | head -1; ffmpeg -version | head -1
-      - name: End-to-end stream test (DPI / VHPI / NVC / VPI vs golden)
+      - name: End-to-end stream test, PPM default (DPI / VHPI / NVC / VPI vs golden)
         run: make stream-test
+      - name: End-to-end stream test, raw rgb24 wire format
+        run: make raw-test
       - name: COLOR_BITS=4 end-to-end test (VPI vs 4-bit golden)
         run: make color-bits-test
