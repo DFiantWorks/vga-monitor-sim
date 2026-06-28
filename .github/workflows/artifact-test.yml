@@ -128,7 +128,9 @@ jobs:
       - name: Test prebuilt artifacts (GHDL/VHPI, LLVM backend)
         shell: msys2 {0}
         run: |
-          ghdl --version | head -1
+          # Informational only, and non-fatal: some rolling MSYS2 ghdl builds
+          # raise an Ada DEVICE_ERROR just printing --version on Windows.
+          ghdl --version | head -1 || true
           python3 tests/stream_e2e.py --dist dist --sim vhpi
 
   # GHDL mcode backend (x86_64 only -- mcode has no arm64/macOS codegen). No link
@@ -155,7 +157,7 @@ jobs:
           backend: mcode
       - name: Test prebuilt artifact (GHDL/VHPI, mcode backend)
         run: |
-          ghdl --version | head -1
+          ghdl --version | head -1 || true
           python3 tests/stream_e2e.py --dist dist --sim mcode
 
   # Windows GHDL mcode. Install the mcode package EXPLICITLY: the bare
@@ -184,5 +186,5 @@ jobs:
       - name: Test prebuilt artifact (GHDL/VHPI, mcode backend)
         shell: msys2 {0}
         run: |
-          ghdl --version | head -1
+          ghdl --version | head -1 || true
           python3 tests/stream_e2e.py --dist dist --sim mcode

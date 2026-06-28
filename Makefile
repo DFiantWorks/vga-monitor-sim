@@ -6,17 +6,18 @@
 # VHPIDIRECT (vhdl/), VPI (v/). It reconstructs the framebuffer in-process and
 # streams each finished frame; no windowing toolkit is linked into the simulator.
 #
-# Start a viewer first (it listens), then run a stream target (the sim connects
-# once geometry locks):
-#   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 \
-#          -i 'tcp://127.0.0.1:5000?listen=1'
+# The monitor is the SERVER: a stream target listens, and a viewer connects to
+# it. Launch order does not matter and a viewer can connect/disconnect/reconnect
+# on the fly; the simulation runs unaffected while none is attached. The live
+# targets stream self-describing PPM (VGA_MONITOR_FORMAT=ppm) so ffplay resyncs
+# on the P6 magic when it joins mid-stream and needs no -video_size:
 #   make stream-dpi       # or stream-vhpi / stream-vpi   (STREAM=host:port)
 #   make stream-two       # two moving patterns -> two viewers (ports base, base+1)
+#   ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'    # connect any time
 #
-# For a self-describing stream set VGA_MONITOR_FORMAT=ppm: each frame carries a
-# P6 header with its geometry, so the viewer needs no -video_size:
-#   VGA_MONITOR_FORMAT=ppm make stream-dpi
-#   ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000?listen=1'
+# Raw rgb24 is the other wire format (VGA_MONITOR_FORMAT=raw); the viewer must be
+# told the geometry out of band and cannot resync mid-stream:
+#   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000'
 #
 # Full end-to-end test (ffmpeg grabs a frame off the socket, compares to golden):
 #   make stream-test      # build from source;  SIM=dpi|vhpi|nvc|vpi|all
@@ -30,6 +31,10 @@ MODULE  ?= tb_gradient
 STREAM  ?= 127.0.0.1:5000
 SIM     ?= all
 DIST    ?= $(BUILD)/dist
+# Wire format for the run targets: ppm (self-describing P6, the recommended live
+# default -- a viewer resyncs on the P6 magic when it joins mid-stream) or raw
+# (rgb24, viewer needs -video_size). The e2e harness overrides this per test.
+FORMAT  ?= ppm
 
 # DUT shared by every fixture. The Verilog DUT (.sv) also serves the VPI flow.
 SV_DUT   := examples/vga_signal_generator.sv examples/gradient_source.sv
@@ -53,40 +58,42 @@ GHDL ?= ghdl
 # ---- DPI / Verilator, built WITHOUT --timing (clock from sim_main) ----------
 stream-dpi:
 	mkdir -p $(BUILD)/stream-dpi
-	verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
+	$(CXXENV) verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
 		--top-module tb_stream --Mdir $(BUILD)/stream-dpi -o tb_stream \
 		examples/tb_stream.sv examples/vga_signal_generator.sv examples/gradient_source.sv \
 		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main_stream.cpp) \
 		$(VERILATED_OPT) $(SOCK_LDFLAGS)
-	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-dpi/tb_stream
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) ./$(BUILD)/stream-dpi/tb_stream
 
 # ---- Two monitors, two MOVING patterns -> two streams (ports base, base+1) --
-# A richer thing to watch. Start two viewers first (default ports 5000 + 5001):
-#   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000?listen=1'
-#   ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5001?listen=1'
+# A richer thing to watch. Run this target (it listens on ports 5000 + 5001),
+# then connect a viewer to each, in any order, whenever:
+#   ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'
+#   ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5001'
 stream-two:
 	mkdir -p $(BUILD)/stream-two
-	verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
+	$(CXXENV) verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
 		--top-module tb_two_monitors --Mdir $(BUILD)/stream-two -o tb_two_monitors \
 		examples/tb_two_monitors.sv examples/vga_signal_generator.sv \
 		examples/scroll_source.sv examples/bars_box_source.sv \
 		sv/vga_monitor.sv $(abspath $(BACKEND) examples/sim_main.cpp) \
 		$(VERILATED_OPT) $(SOCK_LDFLAGS)
-	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-two/tb_two_monitors
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) ./$(BUILD)/stream-two/tb_two_monitors
 
 # ---- VHPIDIRECT / GHDL -----------------------------------------------------
 $(BUILD)/stream-vhpi/backend.o: $(BACKEND)
 	mkdir -p $(BUILD)/stream-vhpi
-	g++ -O2 -fPIC -c $(BACKEND) -o $@
+	$(CXXENV) g++ -O2 -fPIC -c $(BACKEND) -o $@
 $(BUILD)/stream-vhpi/vhpi.o: vhdl/vga_monitor_vhpi.cpp
 	mkdir -p $(BUILD)/stream-vhpi
-	g++ -O2 -fPIC -c $< -o $@
+	$(CXXENV) g++ -O2 -fPIC -c $< -o $@
 stream-vhpi: $(BUILD)/stream-vhpi/backend.o $(BUILD)/stream-vhpi/vhpi.o
 	$(GHDL) -a --std=08 --workdir=$(BUILD)/stream-vhpi \
 		vhdl/vga_monitor_pkg.vhdl vhdl/vga_monitor.vhdl $(VHDL_DUT) examples/tb_gradient.vhdl
 	$(GHDL) -e --std=08 --workdir=$(BUILD)/stream-vhpi -o $(BUILD)/stream-vhpi/$(MODULE) \
-		-Wl,$(BUILD)/stream-vhpi/backend.o -Wl,$(BUILD)/stream-vhpi/vhpi.o -Wl,-lstdc++ $(MODULE)
-	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-vhpi/$(MODULE)
+		-Wl,$(BUILD)/stream-vhpi/backend.o -Wl,$(BUILD)/stream-vhpi/vhpi.o -Wl,-lstdc++ \
+		$(GHDL_SOCK) $(MODULE)
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) ./$(BUILD)/stream-vhpi/$(MODULE)
 
 # ---- VPI / Icarus ----------------------------------------------------------
 # If vvp bundles an older glibc than the system (e.g. oss-cad-suite), run its
@@ -107,7 +114,7 @@ stream-vpi:
 	$(VPI_BUILD) -o $(BUILD)/stream-vpi/vga_monitor.vpi
 	iverilog -g2012 -o $(BUILD)/stream-vpi/$(MODULE).vvp -s $(MODULE) \
 		examples/$(MODULE).v v/vga_monitor.v $(SV_DUT)
-	VGA_MONITOR_STREAM=$(STREAM) \
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) \
 		$(VVP_RUN) -M$(BUILD)/stream-vpi -m vga_monitor $(BUILD)/stream-vpi/$(MODULE).vvp
 
 # ---- Full end-to-end: ffmpeg grabs a frame off the socket vs golden --------
@@ -143,12 +150,32 @@ UNAME_S := $(shell uname -s)
 # currently affected, but the guards cost nothing.
 ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
   STATIC_CXX    := -static-libstdc++ -static-libgcc
-  SOCK_LDFLAGS  := -LDFLAGS "-lws2_32 $(STATIC_CXX)"
+  # Winsock, linked explicitly under MinGW (the backend now also binds/listens/
+  # accepts -- all in ws2_32 -- as the stream SERVER; the #pragma comment(lib) in
+  # the source is MSVC-only). SOCK_LIB is the bare flag for the GHDL/NVC links;
+  # SOCK_LDFLAGS wraps it for Verilator's -LDFLAGS. In libc on Linux/macOS.
+  SOCK_LIB      := -lws2_32
+  GHDL_SOCK     := -Wl,-lws2_32
+  SOCK_LDFLAGS  := -LDFLAGS "$(SOCK_LIB) $(STATIC_CXX)"
   VERILATED_OPT := -CFLAGS -O2
+  # The native MinGW-w64 g++ needs a Windows-style TMP. make's recipe shell
+  # (sh.exe) leaves TMP/TEMP as a POSIX path (/tmp) or empty -- neither of which
+  # the native compiler can resolve, so it falls back to the unwritable C:\WINDOWS
+  # ("cannot create temporary file" -- breaks `dist` and the -shared/-static
+  # links). Point both at build/ in Windows form, computed once here; every recipe
+  # creates its build subdir before it compiles. Prefixed onto the compiler/
+  # verilator commands via $(CXXENV). Skipped if cygpath isn't available.
+  WINTMP        := $(shell cygpath -w "$(abspath $(BUILD))" 2>/dev/null)
+  ifneq (,$(WINTMP))
+    CXXENV      := TMP="$(WINTMP)" TEMP="$(WINTMP)"
+  endif
 else
   STATIC_CXX    :=
+  SOCK_LIB      :=
+  GHDL_SOCK     :=
   SOCK_LDFLAGS  :=
   VERILATED_OPT :=
+  CXXENV        :=
 endif
 ifeq ($(UNAME_S),Darwin)
   LIBPRE     := lib
@@ -178,8 +205,8 @@ endif
 
 dist:
 	mkdir -p $(DIST)
-	$(CXX) -O2 -fPIC $(DIST_FLAGS) $(INST_DPI)  $(BACKEND) $(DIST_LIBS) -o $(DIST)/$(DPI_LIB)
-	$(CXX) -O2 -fPIC $(DIST_FLAGS) $(INST_VHPI) $(BACKEND) vhdl/vga_monitor_vhpi.cpp $(DIST_LIBS) -o $(DIST)/$(VHPI_LIB)
+	$(CXXENV) $(CXX) -O2 -fPIC $(DIST_FLAGS) $(INST_DPI)  $(BACKEND) $(DIST_LIBS) -o $(DIST)/$(DPI_LIB)
+	$(CXXENV) $(CXX) -O2 -fPIC $(DIST_FLAGS) $(INST_VHPI) $(BACKEND) vhdl/vga_monitor_vhpi.cpp $(DIST_LIBS) -o $(DIST)/$(VHPI_LIB)
 	cp sv/vga_monitor.sv vhdl/vga_monitor.vhdl vhdl/vga_monitor_pkg.vhdl \
 	   v/vga_monitor.v $(DIST)/
 	sed -E 's/(is "VHPIDIRECT) (vhpi_monitor_[a-z]+")/\1 $(VHPI_LIB) \2/' \
@@ -198,7 +225,7 @@ else ifneq (,$(filter MINGW% MSYS% CYGWIN%,$(UNAME_S)))
 else
   VPI_LINK := -shared -Wl,--wrap=__isoc23_strtol v/glibc_compat.c
 endif
-VPI_BUILD = $(CXX) -O2 -fPIC -I$(IVL_INC) v/vga_monitor_vpi.cpp $(BACKEND) $(VPI_LINK)
+VPI_BUILD = $(CXXENV) $(CXX) -O2 -fPIC -I$(IVL_INC) v/vga_monitor_vpi.cpp $(BACKEND) $(VPI_LINK)
 
 dist-vpi:
 	mkdir -p $(DIST)
@@ -210,12 +237,12 @@ dist-vpi:
 # would). The harness (tests/stream_e2e.py --dist) calls these per simulator.
 stream-dpi-dist:
 	mkdir -p $(BUILD)/stream-dpi-dist
-	verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
+	$(CXXENV) verilator --cc --exe --build -j 0 -Wno-WIDTH -Wno-CASEINCOMPLETE --timescale 1ns/1ps \
 		--top-module tb_stream --Mdir $(BUILD)/stream-dpi-dist -o tb_stream \
 		examples/tb_stream.sv examples/vga_signal_generator.sv examples/gradient_source.sv \
 		sv/vga_monitor.sv $(abspath examples/sim_main_stream.cpp) \
 		$(VERILATED_OPT) -LDFLAGS "-L$(DIST_ABS) -lvga_monitor_dpi $(RPATH) $(STATIC_CXX)"
-	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-dpi-dist/tb_stream
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) ./$(BUILD)/stream-dpi-dist/tb_stream
 
 stream-vhpi-dist:
 	mkdir -p $(BUILD)/stream-vhpi-dist
@@ -223,19 +250,19 @@ stream-vhpi-dist:
 		vhdl/vga_monitor_pkg.vhdl vhdl/vga_monitor.vhdl $(VHDL_DUT) examples/tb_gradient.vhdl
 	$(GHDL) -e --std=08 --workdir=$(BUILD)/stream-vhpi-dist -o $(BUILD)/stream-vhpi-dist/$(MODULE) \
 		-Wl,-L$(DIST_ABS) -Wl,-lvga_monitor_vhpi -Wl,-Wl,-rpath,$(DIST_ABS) $(MODULE)
-	VGA_MONITOR_STREAM=$(STREAM) ./$(BUILD)/stream-vhpi-dist/$(MODULE)
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) ./$(BUILD)/stream-vhpi-dist/$(MODULE)
 
 # mcode-backend GHDL: no link step, so it LOADS the prebuilt VHPI library named
 # in the generated _mcode wrapper's `foreign` strings. The library must be on
 # the OS loader path -- the e2e harness adds $(DIST) to PATH/LD_LIBRARY_PATH.
-# VGA_MONITOR_FRAMES (set by the harness) ends the run after N frames; the
-# --stop-time is a backstop in case geometry never locks. ghdl-mcode required
-# here (the canonical -Wl link path is stream-vhpi-dist).
+# The monitor serves with no frame limit, so --stop-time bounds this run (the
+# harness grabs its frame well within it). ghdl-mcode required here (the
+# canonical -Wl link path is stream-vhpi-dist).
 stream-mcode-dist:
 	mkdir -p $(BUILD)/stream-mcode-dist
 	$(GHDL) -a --std=08 --workdir=$(BUILD)/stream-mcode-dist \
 		$(DIST)/vga_monitor_pkg_mcode.vhdl vhdl/vga_monitor.vhdl $(VHDL_DUT) examples/tb_gradient.vhdl
-	VGA_MONITOR_STREAM=$(STREAM) $(GHDL) --elab-run --std=08 \
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) $(GHDL) --elab-run --std=08 \
 		--workdir=$(BUILD)/stream-mcode-dist $(MODULE) --stop-time=500ms
 
 stream-nvc-dist:
@@ -243,25 +270,25 @@ stream-nvc-dist:
 	nvc --std=2008 --work=$(BUILD)/stream-nvc-dist/work -a \
 		vhdl/vga_monitor_pkg.vhdl vhdl/vga_monitor.vhdl $(VHDL_DUT) examples/tb_gradient.vhdl
 	nvc --std=2008 --work=$(BUILD)/stream-nvc-dist/work -e $(MODULE)
-	VGA_MONITOR_STREAM=$(STREAM) \
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) \
 		nvc --std=2008 --work=$(BUILD)/stream-nvc-dist/work -r $(MODULE) --load $(DIST_ABS)/$(VHPI_LIB)
 
 stream-vpi-dist:
 	mkdir -p $(BUILD)/stream-vpi-dist
 	iverilog -g2012 -o $(BUILD)/stream-vpi-dist/$(MODULE).vvp -s $(MODULE) \
 		examples/$(MODULE).v v/vga_monitor.v $(SV_DUT)
-	VGA_MONITOR_STREAM=$(STREAM) \
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) \
 		$(VVP_RUN) -M$(DIST_ABS) -m vga_monitor $(BUILD)/stream-vpi-dist/$(MODULE).vvp
 
 # ---- VHPIDIRECT / NVC (build-from-source twin of stream-vhpi) ---------------
 stream-nvc:
 	mkdir -p $(BUILD)/stream-nvc
-	$(CXX) -O2 -fPIC -shared $(BACKEND) vhdl/vga_monitor_vhpi.cpp -lstdc++ \
+	$(CXXENV) $(CXX) -O2 -fPIC -shared $(BACKEND) vhdl/vga_monitor_vhpi.cpp -lstdc++ $(SOCK_LIB) \
 		-o $(BUILD)/stream-nvc/$(VHPI_LIB)
 	nvc --std=2008 --work=$(BUILD)/stream-nvc/work -a \
 		vhdl/vga_monitor_pkg.vhdl vhdl/vga_monitor.vhdl $(VHDL_DUT) examples/tb_gradient.vhdl
 	nvc --std=2008 --work=$(BUILD)/stream-nvc/work -e $(MODULE)
-	VGA_MONITOR_STREAM=$(STREAM) \
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) \
 		nvc --std=2008 --work=$(BUILD)/stream-nvc/work -r $(MODULE) --load $(BUILD)/stream-nvc/$(VHPI_LIB)
 
 # ---- COLOR_BITS=4 end-to-end test (one simulator, a 4-bit golden) ----------
@@ -277,7 +304,7 @@ stream-vpi-c4:
 	$(VPI_BUILD) -o $(BUILD)/stream-vpi-c4/vga_monitor.vpi
 	iverilog -g2012 -o $(BUILD)/stream-vpi-c4/tb_gradient_c4.vvp -s tb_gradient_c4 \
 		examples/tb_gradient_c4.v v/vga_monitor.v $(SV_DUT)
-	VGA_MONITOR_STREAM=$(STREAM) \
+	VGA_MONITOR_STREAM=$(STREAM) VGA_MONITOR_FORMAT=$(FORMAT) \
 		$(VVP_RUN) -M$(BUILD)/stream-vpi-c4 -m vga_monitor $(BUILD)/stream-vpi-c4/tb_gradient_c4.vvp
 
 color-bits-test:

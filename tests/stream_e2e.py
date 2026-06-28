@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-# stream_e2e.py -- end-to-end test of the raw rgb24 TCP stream.
+# stream_e2e.py -- end-to-end test of the TCP video stream.
 #
-# For each foreign interface this:
-#   1. starts ffmpeg as the viewer: listen on a TCP port, grab exactly ONE
-#      frame off the socket, write it as a PPM,
-#   2. builds+runs the streaming sim (make stream-<sim>) which connects once
-#      geometry is locked and streams finished frames,
-#   3. compares ffmpeg's grabbed frame to the golden, byte for byte.
+# The monitor is the SERVER: it binds+listens and a viewer connects to it. So for
+# each foreign interface this:
+#   1. builds+runs the streaming sim (make stream-<sim>) in the background, with
+#      NO frame limit so it serves continuously until we stop it,
+#   2. waits for the sim to bind+listen, then starts ffmpeg as the viewer: connect
+#      to the port, grab exactly ONE frame off the socket, write it as a PPM,
+#   3. compares ffmpeg's grabbed frame to the golden, byte for byte,
+#   4. stops the sim (it would otherwise serve forever).
 #
-# This exercises the real path -- simulator -> socket -> standard viewer --
-# rather than a bespoke reader.
+# Starting the sim first and the viewer second is just *this test* pinning a
+# deterministic order; the link itself is order-insensitive (the viewer may
+# attach, drop, and reattach whenever). This exercises the real path --
+# simulator -> socket -> standard viewer -- rather than a bespoke reader.
 #
 # Simulators (each maps to one `make` target):
 #   dpi   -> Verilator (SystemVerilog / DPI-C)
@@ -32,6 +36,7 @@ import filecmp
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -40,7 +45,6 @@ from pathlib import Path
 ROOT   = Path(__file__).resolve().parent.parent
 GOLDEN = ROOT / "golden" / "gradient_640x480.ppm"
 W, H   = 640, 480
-FRAMES = "12"            # > geometry-lock latency (~4 frames); gradient is static
 
 # Optional pattern variants: each maps to a `make` target suffix and its own
 # golden. "" is the default 8-bit gradient; "c4" drives the gradient through a
@@ -142,61 +146,124 @@ def loader_env(env: dict, dist: str) -> None:
     env[var] = d + os.pathsep + env.get(var, "")
 
 
+def popen_group(cmd, env, log):
+    """Start the sim in its own process group/session so we can kill the whole
+    tree (make -> shell -> simulator) afterwards. Output goes to a file, not a
+    pipe, so a chatty sim can never fill a pipe buffer and stall."""
+    if os.name == "nt":
+        return subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log,
+                                stderr=subprocess.STDOUT,
+                                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    return subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log,
+                            stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def kill_group(p):
+    """Tear down the sim's whole process tree (it serves forever with no frame
+    limit, so it won't exit on its own). On Windows the simulator is a grandchild
+    behind MSYS2's make/sh, and taskkill /T can't always walk that tree, so we
+    also kill whatever still holds the port (the actual server) -- see kill_port."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                           capture_output=True)
+        else:
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+    except Exception:
+        p.kill()
+    try:
+        p.wait(timeout=10)
+    except Exception:
+        p.kill()
+
+
+def kill_port(port):
+    """Kill any process still LISTENING on `port` (Windows). A reliable backstop
+    for the sim when the make/sh process tree can't be walked from the parent PID;
+    a no-op on POSIX, where killpg already reaped the whole session."""
+    if os.name != "nt":
+        return
+    out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True).stdout
+    pids = set()
+    for line in out.splitlines():
+        if "LISTENING" not in line.upper():
+            continue
+        toks = line.split()
+        if len(toks) >= 2 and toks[1].endswith(f":{port}") and toks[-1].isdigit():
+            pids.add(toks[-1])
+    for pid in pids:
+        subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+
+
 def run_one(sim, dist, variant="", fmt="raw"):
     port = SIMS[sim][1]
     suffix, golden = VARIANTS[variant]
     target = f"stream-{sim}-dist" if dist else f"stream-{sim}{suffix}"
     tag = f"{sim}{suffix}{'-ppm' if fmt == 'ppm' else ''}"
-    grab = Path(f"/tmp/stream_e2e_{tag}.ppm") if not IS_WINDOWS \
-        else Path(os.environ.get("TEMP", ".")) / f"stream_e2e_{tag}.ppm"
+    tmp = Path("/tmp") if not IS_WINDOWS else Path(os.environ.get("TEMP", "."))
+    grab = tmp / f"stream_e2e_{tag}.ppm"
+    simlog = tmp / f"stream_e2e_{tag}.log"
     if grab.exists():
         grab.unlink()
 
-    # 1. ffmpeg: the standard viewer, grabbing one frame off the socket. In ppm
-    #    mode the stream is self-describing (per-frame P6 headers carry the
-    #    geometry), so image2pipe/ppm reads it with NO -video_size; raw rgb24
-    #    must be told the frame size out-of-band.
-    if fmt == "ppm":
-        ff_input = ["-f", "image2pipe", "-vcodec", "ppm"]
-    else:
-        ff_input = ["-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{W}x{H}"]
-    ff = subprocess.Popen(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", *ff_input,
-         "-i", f"tcp://127.0.0.1:{port}?listen=1", "-frames:v", "1", "-y", str(grab)],
-    )
-    t0 = time.time()
-    while not port_listening(port):
-        if time.time() - t0 > 15:
-            ff.kill()
-            print(f"  {sim}: FAIL (ffmpeg never started listening)")
-            return False
-        time.sleep(0.1)
+    def fail(why, log):
+        print(f"  {sim}: FAIL ({why})")
+        if log.exists():
+            print(log.read_text(errors="replace")[-6000:])
+        return False
 
-    # 2. build + run the streaming sim, connecting to ffmpeg. VGA_MONITOR_FORMAT
-    #    rides the environment through `make` into the sim process (the recipe's
-    #    inline VGA_MONITOR_STREAM doesn't clear it).
-    env = dict(os.environ, VGA_MONITOR_FRAMES=FRAMES)
-    if fmt == "ppm":
-        env["VGA_MONITOR_FORMAT"] = "ppm"
-    cmd = ["make", target, f"STREAM=127.0.0.1:{port}"]
+    # Guard against a stale sim left listening on this port by a botched earlier
+    # run: we'd otherwise connect to it (wrong format/pattern) and mis-report.
+    if port_listening(port):
+        print(f"  {sim}: FAIL (port {port} already in use -- stale sim from a previous run?)")
+        return False
+
+    # 1. build + run the streaming SERVER in the background. No VGA_MONITOR_FRAMES,
+    #    so it serves continuously until kill_group below. The wire format goes in
+    #    as the FORMAT make var (the recipe turns it into VGA_MONITOR_FORMAT for the
+    #    sim); clear any inherited env copy so it can't shadow that.
+    env = dict(os.environ)
+    env.pop("VGA_MONITOR_FRAMES", None)
+    env.pop("VGA_MONITOR_FORMAT", None)
+    cmd = ["make", target, f"STREAM=127.0.0.1:{port}", f"FORMAT={fmt}"]
     if dist:
         loader_env(env, dist)
         cmd.append(f"DIST={dist}")
-    sim_proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
 
-    # 3. let ffmpeg finish writing the grabbed frame.
-    try:
-        ff.wait(timeout=120)
-    except subprocess.TimeoutExpired:
-        ff.kill()
-        print(f"  {sim}: FAIL (ffmpeg did not capture a frame)")
-        print((sim_proc.stdout + sim_proc.stderr)[-6000:])
-        return False
+    with open(simlog, "w") as log:
+        sim_proc = popen_group(cmd, env, log)
+        try:
+            # 2. wait for the sim to bind+listen (this also covers the build time).
+            t0 = time.time()
+            while not port_listening(port):
+                if sim_proc.poll() is not None:
+                    return fail("sim exited before it listened (build/run error?)", simlog)
+                if time.time() - t0 > 240:       # generous: includes a verilator build
+                    return fail("sim never started listening", simlog)
+                time.sleep(0.1)
+
+            # 3. ffmpeg: the standard viewer, connecting to the sim and grabbing one
+            #    frame off the socket. In ppm mode the stream is self-describing
+            #    (per-frame P6 headers carry the geometry), so image2pipe/ppm reads
+            #    it with NO -video_size; raw rgb24 must be told the size out of band.
+            if fmt == "ppm":
+                ff_input = ["-f", "image2pipe", "-vcodec", "ppm"]
+            else:
+                ff_input = ["-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{W}x{H}"]
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-loglevel", "error", *ff_input,
+                     "-i", f"tcp://127.0.0.1:{port}", "-frames:v", "1", "-y", str(grab)],
+                    timeout=120, capture_output=True,
+                )
+            except subprocess.TimeoutExpired:
+                return fail("ffmpeg did not capture a frame", simlog)
+        finally:
+            kill_group(sim_proc)
+            kill_port(port)
 
     if not grab.exists() or grab.stat().st_size == 0:
-        print(f"  {sim}: FAIL (no frame grabbed)")
-        print((sim_proc.stdout + sim_proc.stderr)[-6000:])
-        return False
+        return fail("no frame grabbed", simlog)
 
     ok = filecmp.cmp(grab, golden, shallow=False)
     sz = grab.stat().st_size
