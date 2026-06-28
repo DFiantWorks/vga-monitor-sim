@@ -27,21 +27,23 @@
 //   VGA_MONITOR_FRAMES=<N>    exit(0) after N complete frames (per process)
 //   VGA_MONITOR_STREAM=host:port
 //                             bind + listen here; when a viewer connects, write
-//                             each finished frame as raw rgb24 (W*H*3 bytes). Use
-//                             127.0.0.1 for local viewers, 0.0.0.0 for remote. A
-//                             standard viewer connects to it, e.g.:
-//                               ffplay -f rawvideo -pixel_format rgb24 \
-//                                      -video_size 640x480 -i 'tcp://127.0.0.1:5000'
+//                             each finished frame (default: self-describing PPM).
+//                             Use 127.0.0.1 for local viewers, 0.0.0.0 for remote.
+//                             A standard viewer connects to it, e.g.:
+//                               ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'
 //                             With multiple monitors, instance i (by open order)
 //                             listens on port+i, so each gets its own viewer.
-//   VGA_MONITOR_FORMAT=raw|ppm  stream wire format (default raw; ppm recommended
-//                             for a live viewer). In ppm mode each frame is a
-//                             self-describing P6 PPM (a ~15-byte ASCII
+//   VGA_MONITOR_FORMAT=ppm|raw  stream wire format (default ppm). In ppm mode each
+//                             frame is a self-describing P6 PPM (a ~15-byte ASCII
 //                             "P6\n<W> <H>\n255\n" header carrying the geometry,
-//                             then the same W*H*3 rgb24 bytes), so a viewer needs
-//                             no out-of-band -video_size AND can resync on the P6
-//                             magic when it joins or rejoins mid-stream:
-//                               ffplay -f image2pipe -vcodec ppm -i tcp://127.0.0.1:5000
+//                             then W*H*3 rgb24 bytes), so a viewer needs no
+//                             out-of-band -video_size AND can resync on the P6
+//                             magic when it joins or rejoins mid-stream. Set
+//                             VGA_MONITOR_FORMAT=raw for bare rgb24 (W*H*3 bytes,
+//                             no header) -- leaner, but the viewer must be told
+//                             the geometry up front and cannot resync mid-stream:
+//                               ffplay -f rawvideo -pixel_format rgb24 \
+//                                      -video_size 640x480 -i 'tcp://127.0.0.1:5000'
 //                             The format choice is global across instances.
 
 #include <cerrno>
@@ -232,7 +234,7 @@ long g_frame_limit = -1;          // -1 => unlimited
 bool g_inited = false;
 int  g_open_count = 0;            // monitors opened so far (for per-instance port)
 std::string g_stream_target;      // bind "host:port" or empty (no streaming)
-bool g_stream_ppm = false;        // VGA_MONITOR_FORMAT=ppm -> per-frame P6 headers
+bool g_stream_ppm = true;         // default; VGA_MONITOR_FORMAT=raw -> bare rgb24
 
 void lazy_init_globals() {
     if (g_inited) return;
@@ -245,7 +247,7 @@ void lazy_init_globals() {
         if (s[0]) g_stream_target = s;
     }
     if (const char* f = std::getenv("VGA_MONITOR_FORMAT")) {
-        g_stream_ppm = (std::string(f) == "ppm");
+        g_stream_ppm = (std::string(f) != "raw");   // default ppm; only "raw" opts out
     }
 }
 
