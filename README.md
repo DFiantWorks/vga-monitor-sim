@@ -82,7 +82,7 @@ flowchart LR
         MON["vga_monitor<br/>(reconstruct framebuffer)"]
         DUT -->|"r, g, b,<br/>hsync, vsync"| MON
     end
-    MON -. "raw rgb24 over TCP<br/>(instance i → port+i)" .-> VIEW["ffplay / mpv / VLC<br/>(any reachable machine)"]
+    MON -. "rgb24 / PPM over TCP<br/>(listens on port+i; viewer connects)" .-> VIEW["ffplay / mpv / VLC<br/>(any reachable machine)"]
 ```
 
 Instantiate it anywhere in your hierarchy, wired only to the VGA signals:
@@ -195,14 +195,19 @@ Any program that reads raw rgb24 from a TCP socket works; `ffplay` (shipped with
 | macOS | `brew install ffmpeg` |
 | Windows | `winget install Gyan.FFmpeg` (or `scoop install ffmpeg` / `choco install ffmpeg`) |
 
-The viewer **listens**; the simulator connects to it once geometry locks. The
-same command works on every OS (on Windows use `ffplay.exe`):
+The **simulator is the server**: it binds + listens, and the viewer connects to
+it — like plugging a cable into a monitor. Launch order does not matter, and you
+can connect, disconnect, and reconnect the viewer on the fly; the simulation runs
+unaffected while nothing is attached. The same command works on every OS (on
+Windows use `ffplay.exe`):
 
 ```bash
-ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000?listen=1'
+ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000'
 ```
 
-Alternatives that also read raw rgb24: `mpv`, VLC, GStreamer.
+For a live viewer that may join or rejoin mid-stream, the self-describing **PPM**
+format below is recommended — it lets the viewer resync on each frame's header.
+Alternatives that also read the stream: `mpv`, VLC, GStreamer.
 
 ## Stream format: raw rgb24 or self-describing PPM
 
@@ -226,12 +231,16 @@ header" — so the stream stays standard-tool-compatible while becoming
 frame header):
 
 ```bash
-ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000?listen=1'
+ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'
 ```
 
-Per-frame headers (not header-once) make the stream robust to a late-joining
-reader and match what `image2pipe` expects. The format choice is **global**
-across instances; the per-instance `port+i` mapping is unchanged.
+Per-frame headers (not header-once) make the stream robust to a **late-joining or
+reconnecting** reader: ffplay resyncs on the next `P6` magic, so a viewer can
+attach mid-stream (or reattach after dropping) and lock straight onto the next
+frame — which is why PPM is the recommended format for a live viewer. The format
+choice is **global** across instances; the per-instance `port+i` mapping is
+unchanged. The `make stream-*` run targets default to PPM (`FORMAT=ppm`); pass
+`FORMAT=raw` for raw rgb24.
 
 | | `raw` (default) | `ppm` |
 | --- | --- | --- |
@@ -251,29 +260,32 @@ The flow is the same for every simulator:
 1. **Get the monitor** for your platform: the prebuilt library + HDL wrapper (see
    [Getting the monitor](#getting-the-monitor-no-dependencies)).
 2. **Wire** the monitor into your design (one line, see the snippets above).
-3. **Start a viewer** (it listens; see [A viewer, per OS](#a-viewer-per-os)).
-4. **Run your simulator** with `VGA_MONITOR_STREAM=host:port` set.
+3. **Run your simulator** with `VGA_MONITOR_STREAM=host:port` set — it listens on
+   that address.
+4. **Connect a viewer** to it, in either order, whenever (see
+   [A viewer, per OS](#a-viewer-per-os)).
 
+Launch order is irrelevant and the viewer can come and go at will: the simulator
+is the server, so it just keeps simulating and serves whatever viewer is attached.
 The frame size is fixed once geometry locks, so a standard raw-rgb24 viewer needs
 the resolution up front (`-video_size`); the monitor logs the locked geometry
-(`auto-locked 640x480 ...`); read that line, then point the viewer at it. To skip
-that step entirely, switch to the self-describing PPM format
-([Stream format](#stream-format-raw-rgb24-or-self-describing-ppm)), which carries
-the geometry in-band. Three environment variables control a run:
+(`locked 640x480 ...`) — read that line, then point the viewer at it. To skip that
+step (and to let a viewer join or rejoin mid-stream), switch to the self-describing
+PPM format ([Stream format](#stream-format-raw-rgb24-or-self-describing-ppm)),
+which carries the geometry in-band. Three environment variables control a run:
 
 | Variable | Effect |
 | --- | --- |
-| `VGA_MONITOR_STREAM=host:port` | stream finished frames over TCP (instance *i* → `port+i`) |
+| `VGA_MONITOR_STREAM=host:port` | bind + listen here; serve finished frames over TCP (instance *i* → `port+i`). `127.0.0.1` for local viewers, `0.0.0.0` for remote |
 | `VGA_MONITOR_FORMAT=raw\|ppm` | wire format: `raw` rgb24 (default) or self-describing `ppm` — see [Stream format](#stream-format-raw-rgb24-or-self-describing-ppm) |
-| `VGA_MONITOR_FRAMES=<N>` | exit after N complete frames |
+| `VGA_MONITOR_FRAMES=<N>` | exit after N complete frames (unset = serve forever) |
 
-The examples use `127.0.0.1` (loopback) for viewer and simulator on the same
-host. The viewer can be anywhere reachable, e.g. the simulator on a headless
-server streaming to `ffplay` on your laptop — there, have the viewer listen on
-`0.0.0.0` (all interfaces) and set `VGA_MONITOR_STREAM` to the viewer host's
-address. On Windows set the variable with
-`set VGA_MONITOR_STREAM=127.0.0.1:5000` (cmd) or `$env:VGA_MONITOR_STREAM=...`
-(PowerShell) before launching the simulator.
+The examples use `127.0.0.1` (loopback) for simulator and viewer on the same host.
+The viewer can be anywhere reachable, e.g. the simulator on a headless server with
+`ffplay` on your laptop — there, bind the simulator to `0.0.0.0` (all interfaces)
+with `VGA_MONITOR_STREAM=0.0.0.0:5000` and point the viewer at the server host's
+address. On Windows set the variable with `set VGA_MONITOR_STREAM=127.0.0.1:5000`
+(cmd) or `$env:VGA_MONITOR_STREAM=...` (PowerShell) before launching the simulator.
 
 Add the wrapper that matches your HDL and point your simulator at the prebuilt
 library for the interface it speaks. Pick the section below for your flow. In the
@@ -437,22 +449,25 @@ sudo make install
 
 ## Build and run the examples
 
-Start a viewer first (it listens); the simulator connects once geometry locks:
+Run a target (it listens), then connect a viewer to it — in either order, and as
+often as you like. The run targets serve **PPM** by default, so the viewer resyncs
+on each frame header when it joins mid-stream:
 
 ```bash
-ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000?listen=1'
-
 make stream-dpi           # 640x480 gradient via Verilator (DPI)
 make stream-vhpi          # via GHDL (VHPIDIRECT)
 make stream-nvc           # via NVC  (VHPIDIRECT)
 make stream-vpi           # via Icarus (VPI)
 make stream-two           # two MOVING patterns -> two viewers (ports 5000, 5001)
 make clean
+
+# in another terminal (connect/disconnect/reconnect any time):
+ffplay -f image2pipe -vcodec ppm -i 'tcp://127.0.0.1:5000'
 ```
 
-Override the target with `STREAM=host:port` (default `127.0.0.1:5000`). To watch
-a self-describing PPM stream instead, set `VGA_MONITOR_FORMAT=ppm` on the make
-invocation and start the viewer with `ffplay -f image2pipe -vcodec ppm`
+Override the address with `STREAM=host:port` (default `127.0.0.1:5000`). To use
+raw rgb24 instead of PPM, pass `FORMAT=raw` on the make invocation and view with
+`ffplay -f rawvideo -pixel_format rgb24 -video_size 640x480 -i 'tcp://127.0.0.1:5000'`
 ([Stream format](#stream-format-raw-rgb24-or-self-describing-ppm)).
 
 The VHDL flow links `backend/vga_monitor.cpp` + `vhdl/vga_monitor_vhpi.cpp` and
@@ -482,9 +497,11 @@ end-to-end on a single simulator (Icarus/VPI): the gradient is driven through a
 `golden/gradient_640x480_c4.ppm`. One simulator suffices because the backend is
 simulator-agnostic (the frame is byte-identical across DPI/VHPI/VPI).
 
-For each simulator this starts `ffmpeg` as the viewer, grabs exactly one frame
-off the socket, and compares it byte-for-byte to the committed golden, exiting
-non-zero on any mismatch. It needs `ffmpeg` and either `ss` or `netstat`, and
+For each simulator this starts the sim (the server) in the background, waits for
+it to listen, connects `ffmpeg` as the viewer to grab exactly one frame off the
+socket, and compares it byte-for-byte to the committed golden — then stops the
+sim — exiting non-zero on any mismatch. It needs `ffmpeg` and either `ss` or
+`netstat`, and
 **skips any simulator whose tool isn't installed** (logging the skip), so the
 same command runs on Linux, macOS, and Windows with whatever FOSS simulators are
 present.
